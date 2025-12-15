@@ -507,6 +507,33 @@ def classify_date_entity(full_text: str, start: int, end: int) -> str:
     return "FECHA"
 
 
+def classify_person_role_by_context(full_text: str, start: int, end: int, default: str) -> str:
+    """
+    Decide si un nombre es PACIENTE o PROFESIONAL usando pistas del contexto.
+    - Si hay señales fuertes de profesional (Dr/Dra/Médico) cerca -> PROFESIONAL
+    - Si justo después aparece 'ingresó/ingresa/admitido...' -> PACIENTE
+    Si no hay pistas, devuelve default.
+    """
+    left = full_text[max(0, start - 40):start].lower()
+    right = full_text[end:end + 60].lower()
+    ctx = left + " " + right
+
+    # 1) Señales de profesional (ganan sobre todo)
+    if any(k in ctx for k in ["dr.", "dra.", "doctor", "doctora", "médico", "medico"]):
+        return "NOMBRE_PROFESIONAL"
+
+    # 2) Señales de paciente (especialmente "ingresó" justo después)
+    #    Ajusta la lista si quieres más verbos.
+    patient_markers = [
+        " ingresó", " ingreso", " ingresa", " ingresaba",
+        " admitido", " admitida", " admisión", " admision",
+        " paciente", " se presenta", " acude", " acudió", " acudio"
+    ]
+    if any(k in ctx for k in patient_markers):
+        return "NOMBRE_PACIENTE"
+
+    return default
+
 
 
 def classify_date_entity_by_context(text: str, start: int, end: int) -> str:
@@ -900,7 +927,11 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         # Filtro anti-FP para nombres (muy útil en notas cortas)
         if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
             if not is_probable_person_name(span_raw):
-                continue
+                        continue
+        # Resolver PACIENTE vs PROFESIONAL por contexto ("ingresó" después del nombre, etc.)
+        if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
+            ent_canon = classify_person_role_by_context(texto, start, end, default=ent_canon)
+
 
 
         # Si es fecha genérica, clasificar por contexto
@@ -965,6 +996,9 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
 
 
             ent_canon = canonicalize_entity_name(rule.entity)
+            if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
+                ent_canon = classify_person_role_by_context(texto, start, end, default=ent_canon)
+
 
             # Reclasificar FECHA por contexto
             if ent_canon == "FECHA":
