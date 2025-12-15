@@ -5,13 +5,13 @@ from typing import List, Dict, Tuple
 import pandas as pd
 from transformers import AutoTokenizer, AutoModelForTokenClassification, pipeline
 
-# ========= CONFIGURACIÓN GENERAL =========
+# Configuración General
 
 EXCEL_PATH = "Gold_Standard_Anonimizacion.xlsx"
 
-SHEET_GUIDELINES = "Guidelines"        # reglas, regex, sustituciones
-SHEET_TEXTOS = "Datos_Originales"      # textos originales (ID, Texto)
-SHEET_GOLD = "Gold_Standard"           # anotaciones gold (ID, Start, End, Entidad, Texto)
+SHEET_GUIDELINES = "Guidelines"       
+SHEET_TEXTOS = "Datos_Originales"      
+SHEET_GOLD = "Gold_Standard"           
 
 OUTPUT_EXCEL = "Resultados_Anonimizador_Hibrido_v3.xlsx"
 
@@ -20,12 +20,11 @@ MODEL_NAME = "BSC-NLP4BIA/bsc-bio-ehr-es-meddocan"
 # Umbral mínimo de confianza para aceptar entidades del NER
 NER_SCORE_THRESHOLD = 0.80
 NER_SCORE_BY_ENTITY = {
-    # En de-ID suele interesar recall alto en NOMBRE/DIRECCION
+    
     "NOMBRE_PACIENTE": 0.50,
     "NOMBRE_PROFESIONAL": 0.70,
     "HOSPITAL": 0.60,
     "DIRECCION": 0.60,
-    # Formatos/IDs suelen ser más “fáciles”, podemos exigir más
     "DNI_NIF": 0.75,
     "NHC": 0.75,
     "TELEFONO": 0.70,
@@ -40,7 +39,7 @@ NER_SCORE_BY_ENTITY = {
 }
 
 
-# ========= MODELOS DE DATOS =========
+# Modelos de datos
 
 @dataclass
 class Rule:
@@ -55,12 +54,12 @@ class Prediction:
     id_texto: int
     start: int
     end: int
-    entity: str         # nombre de entidad "humano" (Guidelines-like o canónico)
+    entity: str         
     text: str
     score: float = 1.0
 
 
-# ========= CARGA DE DATOS =========
+# Carga de datos
 
 def load_guidelines(path: str = EXCEL_PATH, sheet_name: str = SHEET_GUIDELINES) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=sheet_name)
@@ -140,7 +139,7 @@ def _flexible_whitespace_pattern(s: str) -> str:
     Convierte un texto literal en patrón tolerante a espacios/puntuación frecuente.
     """
     esc = re.escape(s.strip())
-    esc = re.sub(r"\\\s+", r"\\s+", esc)  # espacios escapados -> \s+
+    esc = re.sub(r"\\\s+", r"\\s+", esc)  
     esc = esc.replace(r"\,", r"\s*,\s*")
     esc = esc.replace(r"\.", r"\s*\.\s*")
     esc = esc.replace(r"\-", r"\s*-\s*")
@@ -166,33 +165,33 @@ def _date_candidates_from_excel_datetime(s: str) -> List[str]:
     mo_i = int(mo)
     y2 = y[-2:]
 
-    # Orden 1: DD/MM/YYYY
+    # DD/MM/YYYY
     ddmmYYYY = [
-        f"{d}/{mo}/{y}",              # 06/08/1990
-        f"{d_i}/{mo_i}/{y}",          # 6/8/1990
-        f"{d_i}/{mo}/{y}",            # 6/08/1990
-        f"{d}/{mo_i}/{y}",            # 06/8/1990
-        f"{d}/{mo}/{y2}",             # 06/08/90
-        f"{d_i}/{mo_i}/{y2}",         # 6/8/90
-        f"{d_i}/{mo}/{y2}",           # 6/08/90
-        f"{d}/{mo_i}/{y2}",           # 06/8/90
+        f"{d}/{mo}/{y}",              
+        f"{d_i}/{mo_i}/{y}",          
+        f"{d_i}/{mo}/{y}",            
+        f"{d}/{mo_i}/{y}",            
+        f"{d}/{mo}/{y2}",             
+        f"{d_i}/{mo_i}/{y2}",        
+        f"{d_i}/{mo}/{y2}",           
+        f"{d}/{mo_i}/{y2}",           
     ]
 
-    # Orden 2: MM/DD/YYYY (día/mes invertidos)
+    # MM/DD/YYYY (día/mes invertidos)
     mmddYYYY = [
-        f"{mo}/{d}/{y}",              # 08/06/1990
-        f"{mo_i}/{d_i}/{y}",          # 8/6/1990
-        f"{mo_i}/{d}/{y}",            # 8/06/1990
-        f"{mo}/{d_i}/{y}",            # 08/6/1990
-        f"{mo}/{d}/{y2}",             # 08/06/90
-        f"{mo_i}/{d_i}/{y2}",         # 8/6/90
-        f"{mo_i}/{d}/{y2}",           # 8/06/90
-        f"{mo}/{d_i}/{y2}",           # 08/6/90
+        f"{mo}/{d}/{y}",              
+        f"{mo_i}/{d_i}/{y}",          
+        f"{mo_i}/{d}/{y}",           
+        f"{mo}/{d_i}/{y}",            
+        f"{mo}/{d}/{y2}",             
+        f"{mo_i}/{d_i}/{y2}",         
+        f"{mo_i}/{d}/{y2}",           
+        f"{mo}/{d_i}/{y2}",       
     ]
 
     cands = [f"{y}-{mo}-{d}"] + ddmmYYYY + mmddYYYY
 
-    # Quita duplicados manteniendo orden
+    # Quita duplicados
     out = []
     seen = set()
     for c in cands:
@@ -212,9 +211,8 @@ def _strip_accents(s: str) -> str:
 
 def _find_accent_insensitive(full: str, needle: str) -> Tuple[int, int] | None:
     """
-    Busca needle en full ignorando acentos.
-    Devuelve (start,end) en el texto ORIGINAL si encuentra.
-    Implementación: compara sobre versiones sin acentos (misma longitud por char).
+    Busca needle en full ignorando acento, devuelve (start,end) en el texto ORIGINAL si encuentra y 
+    se implementa comparando sobre versiones sin acentos (misma longitud por char).
     """
     full_norm = _strip_accents(full)
     needle_norm = _strip_accents(needle)
@@ -226,13 +224,7 @@ def _find_accent_insensitive(full: str, needle: str) -> Tuple[int, int] | None:
 
 
 def repair_gold_offsets(df_textos: pd.DataFrame, df_gold: pd.DataFrame, max_print: int = 30) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Repara Start/End del gold contra el texto real actual (por ID):
-    1) Si slice exacto coincide → OK
-    2) Si no coincide → busca ocurrencias exactas de Texto_gold y elige la más cercana al Start original
-    3) Si no hay exacto → intenta regex tolerante a espacios/puntuación
-    Devuelve: (df_gold_fixed, df_report)
-    """
+    "Repara Start/End del gold contra el texto real actual (por ID): "
     textos = {int(r["ID"]): str(r["Texto"]) for _, r in df_textos.iterrows()}
 
     repaired_rows = []
@@ -336,7 +328,7 @@ def repair_gold_offsets(df_textos: pd.DataFrame, df_gold: pd.DataFrame, max_prin
 
         new_row = {**g.to_dict(), "Start": int(s_new), "End": int(e_new)}
 
-        # IMPORTANTE: si hemos conseguido ubicar el span, hacemos que Texto sea el slice real
+        # si hemos conseguido ubicar el span, hacemos que Texto sea el slice real
         if status in {"REPAIRED_EXACT", "REPAIRED_FLEX", "REPAIRED_PHONE", "REPAIRED_DATE", "REPAIRED_EMAIL_NEAR", "REPAIRED_ADDR_NOACC"}:
 
             new_row["Texto"] = slice_now
@@ -378,17 +370,17 @@ def repair_gold_offsets(df_textos: pd.DataFrame, df_gold: pd.DataFrame, max_prin
 
 
 
-# ========= UTILIDADES DE NLP LIGERO / TAXONOMÍA =========
+# NLP ligero y taxonomía
 
 def canonicalize_entity_name(name: str) -> str:
     """
     Normaliza nombres de entidades GOLD/MEDDOCAN/guidelines a una
-    taxonomía estable (la que estás usando en el análisis).
+    taxonomía estable.
     """
     t_raw = str(name).strip()
     t = t_raw.lower()
 
-    # --- Nombres / sujetos ---
+    # Nombres
     if ("nombre" in t and "paciente" in t) or "nombre_sujeto_asistencia" in t:
         return "NOMBRE_PACIENTE"
 
@@ -404,7 +396,7 @@ def canonicalize_entity_name(name: str) -> str:
 
     
 
-    # --- Hospital / institución ---
+    # Hospital
     if t_raw.upper() in {"HOSPITL"}:
         return "HOSPITAL"
 
@@ -413,25 +405,25 @@ def canonicalize_entity_name(name: str) -> str:
        or "institución" in t or "institucion" in t:
         return "HOSPITAL"
 
-    # --- Dirección / localización ---
+    # Dirección
     if "dirección" in t or "direccion" in t or "calle" in t or "territorio" in t \
        or "código postal" in t or "codigo postal" in t or "ciudad" in t \
        or "provincia" in t:
         return "DIRECCION"
 
-    # --- Teléfono ---
+    # Teléfono
     if "teléfono" in t or "telefono" in t or "numero_telefono" in t:
         return "TELEFONO"
 
-    # --- Email (incluyendo typo EMALI del gold) ---
+    # Email
     if "correo" in t or "email" in t or "mail" in t or t_raw.upper() == "EMALI":
         return "EMAIL"
 
-    # --- Edad ---
+    # Edad
     if "edad" in t:
         return "EDAD"
 
-    # --- Fechas específicas ---
+    # Fechas específicas
     if "nacimiento" in t:
         return "FECHA_NACIMIENTO"
     if "ingreso" in t or "admisión" in t or "admision" in t:
@@ -439,11 +431,11 @@ def canonicalize_entity_name(name: str) -> str:
     if "alta" in t and "fecha" in t:
         return "FECHA_ALTA"
 
-    # --- Fecha genérica / etiqueta MEDDOCAN FECHAS ---
+    # Fechas genéricas (etiqueta MEDDOCAN)
     if "fecha" in t or t_raw.upper() == "FECHAS":
         return "FECHA"
 
-    # --- Identificadores personales ---
+    # Identificadores personales
     if "dni" in t or "nif" in t or "id_sujeto_asistencia" in t:
         return "DNI_NIF"
 
@@ -456,7 +448,7 @@ def canonicalize_entity_name(name: str) -> str:
     # IP explícita
     if t_raw.upper() in {"IP", "DIRECCION IP", "DIRECCIÓN IP"}:
         return "IP"
-    # IDs técnicos / internos / dispositivos (DEV-..., XK..., etc.)
+    # IDs técnicos
     if "device" in t or "dispositivo" in t or t_raw.upper() in {"DEVICE_ID"}:
         return "DEVICE_ID"
     
@@ -466,7 +458,7 @@ def canonicalize_entity_name(name: str) -> str:
 
 
 
-    # El resto, devolvemos en mayúsculas tal cual
+    # El resto se devuelve en mayúsculas tal cual
     return t_raw.upper()
 
 
@@ -482,14 +474,14 @@ def classify_date_entity(full_text: str, start: int, end: int) -> str:
     window_right = full_text[end:end + 80].lower()
     ctx = window_left + " " + window_right
 
-    # ✅ Nacimiento (más variantes)
+    # Nacimiento
     if any(k in ctx for k in [
         "nacim", "nació", "nacio", "fnac", "f. nac", "f nac",
         "fecha de nacimiento", "nacido", "nacida"
     ]):
         return "FECHA_NACIMIENTO"
 
-    # ✅ Ingreso / admisión (más variantes)
+    # Ingreso 
     if any(k in ctx for k in [
         "ingres", "ingreso", "ingresó", "ingreso el", "fecha de ingreso",
         "admis", "admisión", "admision", "admitido", "admitida", "admis.",
@@ -497,7 +489,7 @@ def classify_date_entity(full_text: str, start: int, end: int) -> str:
     ]):
         return "FECHA_INGRESO"
 
-    # ✅ Alta (más variantes)
+    # Alta
     if any(k in ctx for k in [
         "alta", "alta el", "fecha de alta", "alta hospitalaria",
         "alta médica", "alta medica", "discharge"
@@ -508,22 +500,16 @@ def classify_date_entity(full_text: str, start: int, end: int) -> str:
 
 
 def classify_person_role_by_context(full_text: str, start: int, end: int, default: str) -> str:
-    """
-    Decide si un nombre es PACIENTE o PROFESIONAL usando pistas del contexto.
-    - Si hay señales fuertes de profesional (Dr/Dra/Médico) cerca -> PROFESIONAL
-    - Si justo después aparece 'ingresó/ingresa/admitido...' -> PACIENTE
-    Si no hay pistas, devuelve default.
-    """
+   
     left = full_text[max(0, start - 40):start].lower()
     right = full_text[end:end + 60].lower()
     ctx = left + " " + right
 
-    # 1) Señales de profesional (ganan sobre todo)
+    # 1) Señales de profesional
     if any(k in ctx for k in ["dr.", "dra.", "doctor", "doctora", "médico", "medico"]):
         return "NOMBRE_PROFESIONAL"
 
-    # 2) Señales de paciente (especialmente "ingresó" justo después)
-    #    Ajusta la lista si quieres más verbos.
+    # 2) Señales de paciente 
     patient_markers = [
         " ingresó", " ingreso", " ingresa", " ingresaba",
         " admitido", " admitida", " admisión", " admision",
@@ -537,10 +523,7 @@ def classify_person_role_by_context(full_text: str, start: int, end: int, defaul
 
 
 def classify_date_entity_by_context(text: str, start: int, end: int) -> str:
-    """
-    (Versión alternativa) A partir del contexto local alrededor de una fecha, decide si es
-    fecha de nacimiento / ingreso / alta / genérica.
-    """
+    
     window = 40
     left = max(0, start - window)
     right = min(len(text), end + window)
@@ -571,11 +554,7 @@ SPANISH_PROVINCES = {
 
 
 def refine_address_entity(text: str, start: int, end: int, base_entity: str) -> str:
-    """
-    Dado un span detectado como dirección (CALLE, TERRITORIO, etc.),
-    intenta clasificarlo un poco mejor. A efectos de evaluación y placeholders,
-    todos estos acabarán mapeados a la entidad canónica DIRECCION.
-    """
+    
     span = text[start:end].strip()
     span_l = span.lower()
 
@@ -599,7 +578,7 @@ def refine_address_entity(text: str, start: int, end: int, base_entity: str) -> 
     return base_entity
 
 
-# ========= VALIDADORES LIGEROS PARA REDUCIR FP =========
+#  Validadores ligeros (Reducir FP)
 
 def count_digits(s: str) -> int:
     return sum(ch.isdigit() for ch in s)
@@ -619,11 +598,7 @@ DNI_REGEX = re.compile(r"\b\d{8}[A-HJ-NP-TV-Z]\b", re.IGNORECASE)
 
 
 def is_probable_dni_or_id(text: str) -> bool:
-    """
-    Consideramos probable DNI/NIF/ID sujeto:
-      - si cumple patrón DNI clásico
-      - o tiene >= 6 caracteres alfanuméricos (mixto), evitando trocitos como '00', '99123'
-    """
+    
     if DNI_REGEX.search(text):
         return True
     raw = re.sub(r"[^A-Za-z0-9]", "", text)
@@ -634,6 +609,28 @@ COMMON_NON_NAME_TOKENS = {
     "consulta", "paciente", "doctor", "doctora", "dra", "dr",
     "fecha", "ingreso", "alta", "diagnóstico", "diagnostico"
 }
+
+
+def trim_person_name_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """
+    Recorta spans de nombre para eliminar colas típicas:
+    ', de 52 años', ', de', ', 52 años', etc.
+    """
+    span = text[start:end]
+
+    # corta por coma seguida de 'de', dígitos o edad
+    m = re.search(r",\s*(de\b|\d|\d+\s*a[nñ]os?)", span, flags=re.IGNORECASE)
+    if m:
+        end = start + m.start()
+
+    # recorte final de puntuación
+    while end > start and text[end - 1] in " ,;:":
+        end -= 1
+
+    return start, end
+
+
+NAME_CONNECTORS = {"de", "del", "la", "las", "los", "y", "da", "do", "dos"}
 
 def is_probable_person_name(span: str) -> bool:
     """
@@ -664,18 +661,23 @@ def is_probable_person_name(span: str) -> bool:
     if any(t.lower().strip(".:,;") in COMMON_NON_NAME_TOKENS for t in toks):
         return False
 
-    # tokens "tipo nombre": empiezan por mayúscula y son letras (permitimos guiones)
     for t in toks:
         t_clean = t.strip(".:,;")
         if not t_clean:
             return False
+
+        t_low = t_clean.lower()
+        if t_low in NAME_CONNECTORS:
+            continue
+
         if not re.match(r"^[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+$", t_clean):
             return False
+
 
     return True
 
 
-# ========= NORMALIZACIÓN DE SPANS (mejora strict en notas cortas) =========
+# Normalización de spans
 
 TRIM_CHARS = " \t\n\r,;:.-()[]{}\"'"
 
@@ -766,7 +768,7 @@ def expand_span_left_titles(text: str, start: int, end: int, ent_canon: str) -> 
 
 
 
-# ========= REGLAS REGEX DESDE GUIDELINES =========
+# Reglas regex desde guidelines
 
 SKIP_REGEX_ENTITIES = {
     "Fecha de nacimiento",
@@ -783,7 +785,7 @@ def sanitize_pattern(entity: str, pattern: str) -> str:
     pattern = str(pattern).strip()
     ent_up = entity.upper()
 
-    # Email / correo electrónico
+    # Email 
     if "MAIL" in ent_up or "CORREO" in ent_up or "EMAIL" in ent_up:
         return r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 
@@ -862,7 +864,7 @@ def build_rules_from_guidelines(df: pd.DataFrame) -> List[Rule]:
     return rules
 
 
-# ========= NER MEDDOCAN =========
+# NER MEDDOCAN 
 
 def load_ner_pipeline(model_name: str = MODEL_NAME):
     print(f"Cargando modelo NER MEDDOCAN: {model_name}")
@@ -918,23 +920,22 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         if score < thr:
             continue
 
-        # Texto crudo detectado (antes de normalizar)
         span_raw = texto[start:end]
+
+        # Edad: exige "años/a."
         if ent_canon == "EDAD" and not re.search(r"(?:años?|a\.?)\b", span_raw.lower()):
             continue
 
-
-        # Filtro anti-FP para nombres (muy útil en notas cortas)
+        # Filtro anti-FP para nombres
         if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
             if not is_probable_person_name(span_raw):
-                        continue
-        # Resolver PACIENTE vs PROFESIONAL por contexto ("ingresó" después del nombre, etc.)
+                continue
+
+        # Resolver PACIENTE vs PROFESIONAL por contexto
         if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
             ent_canon = classify_person_role_by_context(texto, start, end, default=ent_canon)
 
-
-
-        # Si es fecha genérica, clasificar por contexto
+        # Fechas genéricas → específicas por contexto
         if ent_canon in {"FECHA", "FECHAS"}:
             ent_canon = classify_date_entity(texto, start, end)
 
@@ -942,7 +943,7 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         if ent_canon == "INSURANCE_ID" and looks_like_ip(span_raw):
             ent_canon = "IP"
 
-        # Validadores sobre span crudo
+        # Validadores
         if ent_canon == "TELEFONO" and not is_valid_phone(span_raw):
             continue
         if ent_canon == "DNI_NIF" and not is_probable_dni_or_id(span_raw):
@@ -950,7 +951,7 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         if ent_canon == "IP" and not looks_like_ip(span_raw):
             continue
 
-        # Normaliza bordes (aquí está la clave para strict)
+        # Normaliza bordes
         ns, ne = normalize_span(texto, start, end, ent_canon)
         ns, ne = expand_span_left_titles(texto, ns, ne, ent_canon)
         if ne <= ns:
@@ -969,7 +970,39 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
             )
         )
 
+    # ------------------------------------------------------------------
+    # FALLBACK: Nombre al inicio tipo "Roberto Sánchez, ..."
+    # Solo si el NER NO detectó ningún nombre en este texto.
+    # ------------------------------------------------------------------
+    has_any_name = any(p.entity in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"} for p in preds)
+    if not has_any_name:
+        m = re.search(
+            r"^\s*([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+)+)(?=,)",
+            texto
+        )
+        if m:
+            s, e = m.start(1), m.end(1)
+            candidate = texto[s:e]
+            if is_probable_person_name(candidate):
+                ent_canon = classify_person_role_by_context(texto, s, e, default="NOMBRE_PACIENTE")
+
+                ns, ne = normalize_span(texto, s, e, ent_canon)
+                ns, ne = expand_span_left_titles(texto, ns, ne, ent_canon)
+                if ne > ns:
+                    preds.append(
+                        Prediction(
+                            id_texto=id_texto,
+                            start=ns,
+                            end=ne,
+                            entity=ent_canon,
+                            text=texto[ns:ne],
+                            score=0.35,  # score “sintético” (fallback)
+                        )
+                    )
+
     return preds
+
+
 
 
 
@@ -1167,7 +1200,7 @@ def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline, m
 
 
 
-# ========= ANONIMIZACIÓN (HIPAA-LIKE) =========
+#  ANONIMIZACIÓN (HIPAA-LIKE) 
 
 # Placeholders HIPAA-like por entidad canónica
 HIPAA_PLACEHOLDERS = {
