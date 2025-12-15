@@ -1035,7 +1035,7 @@ def resolve_overlaps_global(preds: List[Prediction]) -> List[Prediction]:
 
 
 
-def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline) -> List[Prediction]:
+def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline, merge_address: bool = True) -> List[Prediction]:
     """
     Ejecuta detección híbrida (NER + regex) para todos los textos.
     Aplica:
@@ -1069,7 +1069,8 @@ def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline) -
 
 
         # Si tienes merge_nearby_same_entity definido, úsalo (en tu script sí está)
-        preds_combined = merge_nearby_same_entity(preds_combined, ttext, entity="DIRECCION", max_gap=3)
+            if merge_address:
+                preds_combined = merge_nearby_same_entity(preds_combined, ttext, entity="DIRECCION", max_gap=3)
 
         all_preds.extend(preds_combined)
 
@@ -1528,19 +1529,24 @@ if __name__ == "__main__":
     # 3) Cargar modelo NER
     ner_pipe = load_ner_pipeline()
 
-    # 4) Detectar entidades (NER + regex)
     print("\nLanzando detección híbrida (NER + regex)...")
-    all_preds = detect_all_texts(df_textos, rules, ner_pipe)
-    print(f"Total de entidades detectadas (combinadas): {len(all_preds)}")
 
-    df_preds = preds_to_dataframe(all_preds)
+    # A) Para EVALUACIÓN: NO fusionamos DIRECCION (para que case con spans del GOLD)
+    all_preds_eval = detect_all_texts(df_textos, rules, ner_pipe, merge_address=False)
+    print(f"Total entidades (eval, sin merge direcciones): {len(all_preds_eval)}")
+
+    df_preds = preds_to_dataframe(all_preds_eval)
     analyze_lenient_vs_strict(df_gold_fixed, df_preds)
 
-    print("\nPrimeras predicciones combinadas:")
+    print("\nPrimeras predicciones (eval):")
     print(df_preds.head(20))
 
+    # B) Para ANONIMIZACIÓN: SÍ fusionamos DIRECCION (mejor para producción)
+    all_preds_anon = detect_all_texts(df_textos, rules, ner_pipe, merge_address=True)
+    print(f"Total entidades (anon, con merge direcciones): {len(all_preds_anon)}")
+
     # 5) Anonimizar textos
-    df_anon = anonymize_all_texts(df_textos, all_preds, rules)
+    df_anon = anonymize_all_texts(df_textos, all_preds_anon, rules)
 
     # 6) Evaluar (estricto + lenient) SOBRE GOLD REPARADO
     matching_strict, metrics_strict = evaluate_strict(df_gold_fixed, df_preds)
