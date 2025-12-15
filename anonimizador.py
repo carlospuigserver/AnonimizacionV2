@@ -426,7 +426,7 @@ def canonicalize_entity_name(name: str) -> str:
     if "dni" in t or "nif" in t or "id_sujeto_asistencia" in t:
         return "DNI_NIF"
 
-    if "historia clínica" in t or "historia clinica" in t or "nhc" in t:
+    if "historia clínica" in t or "historia clinica" in t or "nhc" in t or "mrn" in t:
         return "NHC"
 
     if "aseguramiento" in t or "seguro" in t or t_raw.upper() == "ID_ASEGURAMIENTO":
@@ -435,6 +435,11 @@ def canonicalize_entity_name(name: str) -> str:
     # IP explícita
     if t_raw.upper() in {"IP", "DIRECCION IP", "DIRECCIÓN IP"}:
         return "IP"
+    # IDs técnicos / internos / dispositivos (DEV-..., XK..., etc.)
+    if "device" in t or "dispositivo" in t or t_raw.upper() in {"DEVICE_ID"}:
+        return "DEVICE_ID"
+
+
 
     # El resto, devolvemos en mayúsculas tal cual
     return t_raw.upper()
@@ -562,6 +567,59 @@ def is_probable_dni_or_id(text: str) -> bool:
     return len(raw) >= 6
 
 
+
+# ========= NORMALIZACIÓN DE SPANS (mejora strict en notas cortas) =========
+
+TRIM_CHARS = " \t\n\r,;:.-()[]{}\"'"
+
+PREFIX_BY_ENTITY = {
+    "TELEFONO": [r"tel(?:éfono)?[:\s]*", r"tlf[:\s]*", r"tfno[:\s]*"],
+    "EMAIL": [r"correo(?:\s+electr[oó]nico)?[:\s]*", r"email[:\s]*", r"e-?mail[:\s]*"],
+    "DNI_NIF": [r"dni[:\s]*", r"nif[:\s]*"],
+    "NHC": [r"(?:n[º°]\s*)?historia\s+cl[ií]nica[:\s-]*", r"nhc[:\s-]*", r"hc[:\s-]*"],
+    "IP": [r"ip[:\s]*", r"direcci[oó]n\s+ip[:\s]*"],
+    "DIRECCION": [r"dir(?:ecci[oó]n)?[:\s]*", r"domicilio[:\s]*"],
+}
+
+def normalize_span(text: str, start: int, end: int, ent_canon: str) -> tuple[int, int]:
+    """
+    Ajusta start/end para quitar basura típica:
+    - espacios/puntuación periférica
+    - prefijos tipo "teléfono:", "DNI:", "HC:", "IP:", "correo:"
+    """
+    s, e = int(start), int(end)
+    if s < 0: s = 0
+    if e > len(text): e = len(text)
+    if e <= s:
+        return s, e
+
+    # 1) recorte de caracteres periféricos
+    while s < e and text[s] in TRIM_CHARS:
+        s += 1
+    while e > s and text[e - 1] in TRIM_CHARS:
+        e -= 1
+
+    if e <= s:
+        return s, e
+
+    # 2) quitar prefijo si quedó dentro del span
+    span = text[s:e]
+    for pref in PREFIX_BY_ENTITY.get(ent_canon, []):
+        m = re.match(pref, span, flags=re.IGNORECASE)
+        if m:
+            s += m.end()
+            break
+
+    # 3) recorte final tras prefijo
+    while s < e and text[s] in TRIM_CHARS:
+        s += 1
+    while e > s and text[e - 1] in TRIM_CHARS:
+        e -= 1
+
+    return s, e
+
+
+
 # ========= REGLAS REGEX DESDE GUIDELINES =========
 
 SKIP_REGEX_ENTITIES = {
@@ -590,7 +648,8 @@ def sanitize_pattern(entity: str, pattern: str) -> str:
     # Teléfono
     if "TELEFONO" in ent_up or "TELÉFONO" in ent_up:
         # prefijo opcional +34, 9-12 dígitos reales
-        return r"\b(?:\+?\d{1,3}[ ]?)?(?:\d[ ]?){9,12}\b"
+        return r"(?:\+?\d{1,3}[ ]?)?(?:\d[ ]?){9,12}"
+
 
     # IP
     if entity.strip().lower() in {"ip", "dirección ip", "direccion ip"}:
@@ -694,10 +753,8 @@ def map_ner_label_to_entity(label: str) -> str:
     clean = label.replace("B-", "").replace("I-", "").upper()
     return NER_LABEL_MAP.get(clean, clean)
 
-
 def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Prediction]:
     preds: List[Prediction] = []
-
     outputs = ner_pipeline(texto)
 
     for ent in outputs:
@@ -705,44 +762,47 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         end = int(ent["end"])
         score = float(ent.get("score", 1.0))
         raw_label = ent.get("entity_group") or ent.get("entity", "")
-        span_text = texto[start:end]
 
-        
-
-        # Pasar por el mapeo MEDDOCAN → etiqueta humana → entidad canónica
+        # Map MEDDOCAN → etiqueta humana → canónica
         human_label = map_ner_label_to_entity(raw_label)
         ent_canon = canonicalize_entity_name(human_label)
-        # UMBRAL POR ENTIDAD (mejor para recall en PHI)
+
+        # Umbral por entidad
         thr = NER_SCORE_BY_ENTITY.get(ent_canon, NER_SCORE_THRESHOLD)
         if score < thr:
             continue
 
+        # Texto crudo detectado (antes de normalizar)
+        span_raw = texto[start:end]
 
-        # 1) Si es una fecha genérica (FECHAS), refinamos usando contexto
+        # Si es fecha genérica, clasificar por contexto
         if ent_canon in {"FECHA", "FECHAS"}:
             ent_canon = classify_date_entity(texto, start, end)
 
-        # 2) Si el modelo ha etiquetado como INSURANCE_ID pero el texto es una IP, corregimos
-        if ent_canon == "INSURANCE_ID" and looks_like_ip(span_text):
+        # INSURANCE_ID mal clasificado como IP
+        if ent_canon == "INSURANCE_ID" and looks_like_ip(span_raw):
             ent_canon = "IP"
 
-        # 3) FILTROS ESPECÍFICOS PARA REDUCIR FP
-        if ent_canon == "TELEFONO" and not is_valid_phone(span_text):
-            # descarta cosas como "+" sueltas
+        # Validadores sobre span crudo
+        if ent_canon == "TELEFONO" and not is_valid_phone(span_raw):
+            continue
+        if ent_canon == "DNI_NIF" and not is_probable_dni_or_id(span_raw):
+            continue
+        if ent_canon == "IP" and not looks_like_ip(span_raw):
             continue
 
-        if ent_canon == "DNI_NIF" and not is_probable_dni_or_id(span_text):
-            # descarta trocitos como "00", "99123", "-"...
+        # Normaliza bordes (aquí está la clave para strict)
+        ns, ne = normalize_span(texto, start, end, ent_canon)
+        if ne <= ns:
             continue
 
-        if ent_canon == "IP" and not looks_like_ip(span_text):
-            continue
+        span_text = texto[ns:ne]
 
         preds.append(
             Prediction(
                 id_texto=id_texto,
-                start=start,
-                end=end,
+                start=ns,
+                end=ne,
                 entity=ent_canon,
                 text=span_text,
                 score=score,
@@ -752,7 +812,6 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
     return preds
 
 
-# ========= REGLAS REGEX PURAS =========
 
 def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[Prediction]:
     preds: List[Prediction] = []
@@ -761,38 +820,46 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
         pattern = re.compile(rule.pattern, flags=re.IGNORECASE)
 
         for m in pattern.finditer(texto):
-            start, end = m.start(), m.end()
-            span_text = texto[start:end]
+            # Si el regex tiene grupo 1, usa ese span (permite capturar sólo el valor)
+            if m.lastindex and m.lastindex >= 1:
+                start, end = m.start(1), m.end(1)
+            else:
+                start, end = m.start(), m.end()
 
             ent_canon = canonicalize_entity_name(rule.entity)
 
-            # Si es una FECHA genérica desde regex, reclasificamos por contexto
+            # Reclasificar FECHA por contexto
             if ent_canon == "FECHA":
                 ent_canon = classify_date_entity(texto, start, end)
 
-            # --- VALIDADORES para reducir FP (también en regex) ---
+            # Normaliza bordes (quita "teléfono:", "DNI:", etc.)
+            ns, ne = normalize_span(texto, start, end, ent_canon)
+            if ne <= ns:
+                continue
+
+            span_text = texto[ns:ne]
+
+            # Validadores
             if ent_canon == "TELEFONO" and not is_valid_phone(span_text):
                 continue
-
             if ent_canon == "DNI_NIF" and not is_probable_dni_or_id(span_text):
                 continue
-
             if ent_canon == "IP" and not looks_like_ip(span_text):
                 continue
 
             preds.append(
                 Prediction(
                     id_texto=id_texto,
-                    start=start,
-                    end=end,
+                    start=ns,
+                    end=ne,
                     entity=ent_canon,
                     text=span_text,
-                    score=1.0,  # regex → confianza fija
+                    score=1.0,
                 )
             )
 
-
     return preds
+
 
 
 # ========= COMBINACIÓN NER + REGEX =========
@@ -833,15 +900,37 @@ def merge_predictions(preds_a: List[Prediction], preds_b: List[Prediction]) -> L
     return merged
 
 
+ENTITY_PRIORITY = {
+    "DNI_NIF": 100,
+    "NHC": 95,
+    "INSURANCE_ID": 90,
+    "EMAIL": 85,
+    "TELEFONO": 85,
+    "IP": 80,
+    "NOMBRE_PACIENTE": 70,
+    "NOMBRE_PROFESIONAL": 70,
+    "FECHA_NACIMIENTO": 60,
+    "FECHA_INGRESO": 60,
+    "FECHA_ALTA": 60,
+    "FECHA": 50,
+    "HOSPITAL": 40,
+    "DIRECCION": 30,
+    "DEVICE_ID": 75,
+}
+
 def resolve_overlaps_global(preds: List[Prediction]) -> List[Prediction]:
     """
-    Elimina solapes globalmente (independiente de la entidad):
-    - Orden: start asc, longitud desc, score desc
-    - Mantiene spans que no solapan con ya aceptados
+    Elimina solapes priorizando entidades críticas.
+    Mantiene primero: prioridad entidad desc, score desc, longitud desc.
     """
     preds_sorted = sorted(
         preds,
-        key=lambda p: (p.start, -(p.end - p.start), -p.score)
+        key=lambda p: (
+            -ENTITY_PRIORITY.get(canonicalize_entity_name(p.entity), 10),
+            -p.score,
+            -(p.end - p.start),
+            p.start
+        )
     )
 
     kept: List[Prediction] = []
@@ -849,10 +938,20 @@ def resolve_overlaps_global(preds: List[Prediction]) -> List[Prediction]:
         if any(spans_overlap(p.start, p.end, q.start, q.end) for q in kept):
             continue
         kept.append(p)
-    return kept
+
+    # devuelve ordenado por aparición en texto
+    return sorted(kept, key=lambda x: x.start)
+
 
 
 def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline) -> List[Prediction]:
+    """
+    Ejecuta detección híbrida (NER + regex) para todos los textos.
+    Aplica:
+      - merge NER/regex evitando duplicados
+      - resolve_overlaps_global con prioridades
+      - (opcional) merge_nearby_same_entity para DIRECCION si existe la función
+    """
     all_preds: List[Prediction] = []
 
     for _, row in df_textos.iterrows():
@@ -864,15 +963,14 @@ def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline) -
 
         preds_combined = merge_predictions(preds_ner, preds_regex)
         preds_combined = resolve_overlaps_global(preds_combined)
-        # Unir DIRECCION partida en trozos (muy típico)
+
+        # Si tienes merge_nearby_same_entity definido, úsalo (en tu script sí está)
         preds_combined = merge_nearby_same_entity(preds_combined, ttext, entity="DIRECCION", max_gap=3)
-        # Si quieres también: hospitales con trozos (menos frecuente, pero posible)
-        # preds_combined = merge_nearby_same_entity(preds_combined, ttext, entity="HOSPITAL", max_gap=2)
 
-        all_preds.extend(preds_combined)    
-
+        all_preds.extend(preds_combined)
 
     return all_preds
+
 
 
 # ========= ANONIMIZACIÓN (HIPAA-LIKE) =========
@@ -894,6 +992,8 @@ HIPAA_PLACEHOLDERS = {
     "NHC": "<MRN>",
     "INSURANCE_ID": "<INSURANCE_ID>",
     "IP": "<IP_ADDRESS>",
+    "DEVICE_ID": "<DEVICE_ID>",
+
 }
 
 def merge_nearby_same_entity(preds: List[Prediction], text: str, entity: str, max_gap: int = 2) -> List[Prediction]:
@@ -1299,6 +1399,22 @@ if __name__ == "__main__":
     # 2) Construir reglas regex
     rules = build_rules_from_guidelines(df_guidelines)
     print(f"\nSe han construido {len(rules)} reglas regex.")
+
+    # Reglas extra “mínimas” para notas cortas del Excel (IDs que aparecen en el GOLD)
+    EXTRA_RULES = [
+        # NHC / MRN
+        Rule(entity="NHC", pattern=r"\b(?:HC|MRN)-?\s*[A-Z0-9]{4,}\b", replacement="<MRN>", obligatorio=True),
+
+        # ID Seguro / INS
+        Rule(entity="INSURANCE_ID", pattern=r"\bINS-?\s*\d{2,}(?:-\d{2,})+\b", replacement="<INSURANCE_ID>", obligatorio=True),
+
+        # IDs de dispositivo / internos (DEV-..., XK..., etc.)
+        Rule(entity="DEVICE_ID", pattern=r"\b(?:DEV|XK)-[A-Z0-9\-]{3,}\b|\bXK\d{4,}\b", replacement="<DEVICE_ID>", obligatorio=False),
+    ]
+
+    rules.extend(EXTRA_RULES)
+    print(f"Reglas extra añadidas: {len(EXTRA_RULES)}. Total reglas: {len(rules)}")
+
 
     # 3) Cargar modelo NER
     ner_pipe = load_ner_pipeline()
