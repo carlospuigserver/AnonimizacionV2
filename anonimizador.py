@@ -478,21 +478,34 @@ def looks_like_ip(text: str) -> bool:
 
 
 def classify_date_entity(full_text: str, start: int, end: int) -> str:
-    window_left = full_text[max(0, start - 60):start].lower()
-    window_right = full_text[end:end + 60].lower()
-    contexto = window_left + " " + window_right
+    window_left = full_text[max(0, start - 80):start].lower()
+    window_right = full_text[end:end + 80].lower()
+    ctx = window_left + " " + window_right
 
-    if any(k in contexto for k in ["nacim", "nació", "nacio", "fnac", "f. nac", "fecha de nacimiento"]):
+    # ✅ Nacimiento (más variantes)
+    if any(k in ctx for k in [
+        "nacim", "nació", "nacio", "fnac", "f. nac", "f nac",
+        "fecha de nacimiento", "nacido", "nacida"
+    ]):
         return "FECHA_NACIMIENTO"
 
-    if any(k in contexto for k in ["ingres", "ingreso", "ingresó", "ingreso el", "fecha de ingreso",
-                                   "admis", "admisión", "admision", "admitido"]):
+    # ✅ Ingreso / admisión (más variantes)
+    if any(k in ctx for k in [
+        "ingres", "ingreso", "ingresó", "ingreso el", "fecha de ingreso",
+        "admis", "admisión", "admision", "admitido", "admitida", "admis.",
+        "entrada", "hospitalización", "hospitalizacion"
+    ]):
         return "FECHA_INGRESO"
 
-    if any(k in contexto for k in ["alta", "alta el", "fecha de alta", "alta hospitalaria"]):
+    # ✅ Alta (más variantes)
+    if any(k in ctx for k in [
+        "alta", "alta el", "fecha de alta", "alta hospitalaria",
+        "alta médica", "alta medica", "discharge"
+    ]):
         return "FECHA_ALTA"
 
     return "FECHA"
+
 
 
 
@@ -1033,6 +1046,8 @@ ENTITY_PRIORITY = {
     "EMAIL": 85,
     "TELEFONO": 85,
     "IP": 80,
+    "PASAPORTE": 76,
+    "DEVICE_ID": 75,
     "NOMBRE_PACIENTE": 70,
     "NOMBRE_PROFESIONAL": 70,
     "FECHA_NACIMIENTO": 60,
@@ -1041,8 +1056,8 @@ ENTITY_PRIORITY = {
     "FECHA": 50,
     "HOSPITAL": 40,
     "DIRECCION": 30,
-    "DEVICE_ID": 75,
 }
+
 
 def resolve_overlaps_global(preds: List[Prediction]) -> List[Prediction]:
     """
@@ -1596,9 +1611,16 @@ if __name__ == "__main__":
         Rule(entity="INSURANCE_ID", pattern=r"\bINS-?\s*\d{2,}(?:-\d{2,})+\b", replacement="<INSURANCE_ID>", obligatorio=True),
 
         # IDs de dispositivo / internos (DEV-..., XK..., etc.)
-        Rule(entity="DEVICE_ID", pattern=r"\b(?:DEV|XK)-[A-Z0-9\-]{3,}\b|\bXK\d{4,}\b", replacement="<DEVICE_ID>", obligatorio=False),
+        Rule(
+            entity="DEVICE_ID",
+            pattern=r"\bDEV-[A-Z0-9\-]{3,}\b|\bXK-[A-Z0-9\-]{3,}\b",
+            replacement="<DEVICE_ID>",
+            obligatorio=False
+        ),
 
-                # Fecha de nacimiento (captura fecha tras etiquetas típicas)
+
+          
+        # Fecha de nacimiento (captura fecha tras etiquetas típicas)
         Rule(
             entity="FECHA_NACIMIENTO",
             pattern=r"(?i)\b(?:fecha\s*de\s*nacimiento|nacimiento|fnac|f\.\s*nac|nac\.|naci[oó]|nacido|nacida)\b"
