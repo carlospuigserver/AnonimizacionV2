@@ -440,6 +440,10 @@ def canonicalize_entity_name(name: str) -> str:
 
     if "historia clínica" in t or "historia clinica" in t or "nhc" in t or "mrn" in t:
         return "NHC"
+    
+    if t_raw.upper() in {"HC"}:
+        return "NHC"
+
 
     if "aseguramiento" in t or "seguro" in t or t_raw.upper() == "ID_ASEGURAMIENTO":
         return "INSURANCE_ID"
@@ -450,6 +454,10 @@ def canonicalize_entity_name(name: str) -> str:
     # IDs técnicos / internos / dispositivos (DEV-..., XK..., etc.)
     if "device" in t or "dispositivo" in t or t_raw.upper() in {"DEVICE_ID"}:
         return "DEVICE_ID"
+    
+    if "pasaporte" in t or t_raw.upper() == "PASAPORTE":
+        return "PASAPORTE"
+
 
 
 
@@ -633,7 +641,7 @@ PREFIX_BY_ENTITY = {
     "NHC": [
     r"(?:n[º°]\s*)?historia\s+cl[ií]nica[:\s-]*",
     r"nhc[:\s-]*",
-    r"hc[:\s-]*",
+    
     ],
 
     "IP": [r"ip[:\s]*", r"direcci[oó]n\s+ip[:\s]*"],
@@ -676,20 +684,39 @@ def normalize_span(text: str, start: int, end: int, ent_canon: str) -> tuple[int
         e -= 1
 
 
-        # 4) Ajuste específico EDAD: recorta sufijos tipo "años", "a.", "a"
+    # 4) Ajuste específico EDAD: recorta sufijos tipo "años", "a.", "a"
     if ent_canon == "EDAD":
         span2 = text[s:e]
         m_age = re.match(r"^\s*(\d{1,3})\s*(?:años?|a\.?)?\s*$", span2, flags=re.IGNORECASE)
         if m_age:
-            # dejamos solo el número
             num = m_age.group(1)
-            # recalcula e para que acabe justo al final del número dentro del span actual
             num_pos = span2.find(num)
             if num_pos != -1:
                 s = s + num_pos
                 e = s + len(num)
 
 
+    return s, e
+
+
+
+TITLE_LEFT_PAT = re.compile(r"(?:\bDr\.?|\bDra\.?|\bSr\.?|\bSra\.?)\s*$", re.IGNORECASE)
+
+def expand_span_left_titles(text: str, start: int, end: int, ent_canon: str) -> tuple[int, int]:
+    """
+    Si la entidad es un nombre de profesional/paciente, incluye títulos tipo 'Dr.' si están pegados a la izquierda.
+    Mejora STRICT cuando el GOLD incluye el título.
+    """
+    if ent_canon not in {"NOMBRE_PROFESIONAL", "NOMBRE_PACIENTE"}:
+        return start, end
+
+    s, e = start, end
+    left = text[max(0, s - 10):s]  # mira un poco a la izquierda
+    m = TITLE_LEFT_PAT.search(left)
+    if m:
+        s = max(0, s - (len(left) - m.start()))
+        while s < e and text[s].isspace():
+            s += 1
     return s, e
 
 
@@ -876,6 +903,7 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
 
         # Normaliza bordes (aquí está la clave para strict)
         ns, ne = normalize_span(texto, start, end, ent_canon)
+        ns, ne = expand_span_left_titles(texto, ns, ne, ent_canon)
         if ne <= ns:
             continue
 
@@ -926,6 +954,7 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
 
             # Normaliza bordes (quita "teléfono:", "DNI:", etc.)
             ns, ne = normalize_span(texto, start, end, ent_canon)
+            ns, ne = expand_span_left_titles(texto, ns, ne, ent_canon)
             if ne <= ns:
                 continue
 
@@ -1064,14 +1093,19 @@ def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline, m
             for p in preds_regex:
                 print(p.entity, p.start, p.end, repr(p.text))
 
-            print("\n[DEBUG ID=4] preds_final:")
+            print("\n[DEBUG ID=4] preds_final (pre-merge-address):")
             for p in preds_combined:
                 print(p.entity, p.start, p.end, repr(p.text))
 
+        # Si tienes merge_nearby_same_entity definido, úsalo
+        if merge_address:
+            preds_combined = merge_nearby_same_entity(preds_combined, ttext, entity="DIRECCION", max_gap=3)
 
-        # Si tienes merge_nearby_same_entity definido, úsalo (en tu script sí está)
-            if merge_address:
-                preds_combined = merge_nearby_same_entity(preds_combined, ttext, entity="DIRECCION", max_gap=3)
+        if tid == 4 and merge_address:
+            print("\n[DEBUG ID=4] preds_final (post-merge-address):")
+            for p in preds_combined:
+                print(p.entity, p.start, p.end, repr(p.text))
+
 
         all_preds.extend(preds_combined)
 
@@ -1099,6 +1133,8 @@ HIPAA_PLACEHOLDERS = {
     "INSURANCE_ID": "<INSURANCE_ID>",
     "IP": "<IP_ADDRESS>",
     "DEVICE_ID": "<DEVICE_ID>",
+    "PASAPORTE": "<PASSPORT>",
+
 
 }
 
@@ -1560,11 +1596,25 @@ if __name__ == "__main__":
                 # Fecha de nacimiento (captura fecha tras etiquetas típicas)
         Rule(
             entity="FECHA_NACIMIENTO",
-            pattern=r"(?i)\b(?:fecha\s*de\s*nacimiento|nacimiento|nac\.)\s*[:\-]?\s*"
+            pattern=r"(?i)\b(?:fecha\s*de\s*nacimiento|nacimiento|fnac|f\.\s*nac|nac\.|naci[oó]|nacido|nacida)\b"
+                    r"[^0-9]{0,15}"
                     r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b",
             replacement="<DATE_BIRTH>",
             obligatorio=False
         ),
+
+        
+
+        Rule(
+            entity="PASAPORTE",
+            pattern=r"\b(?!\d{8}[A-HJ-NP-TV-Z]\b)([A-Z]{2,3}\d{6,9}|\d{6,9}[A-Z]{2,3})\b",
+            replacement="<PASSPORT>",
+            obligatorio=False
+        ),
+
+
+
+
 
         # Fecha de ingreso / admisión
         Rule(
