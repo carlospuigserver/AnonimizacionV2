@@ -465,24 +465,22 @@ def looks_like_ip(text: str) -> bool:
 
 
 def classify_date_entity(full_text: str, start: int, end: int) -> str:
-    """
-    Clasifica una fecha detectada (ej. por MEDDOCAN como FECHAS)
-    en FECHA_NACIMIENTO / FECHA_INGRESO / FECHA_ALTA / FECHA,
-    usando contexto de la frase.
-    """
-    window_left = full_text[max(0, start - 40):start].lower()
-    window_right = full_text[end:end + 40].lower()
+    window_left = full_text[max(0, start - 60):start].lower()
+    window_right = full_text[end:end + 60].lower()
     contexto = window_left + " " + window_right
 
-    if "nacim" in contexto or "nacimiento" in contexto:
+    if any(k in contexto for k in ["nacim", "nació", "nacio", "fnac", "f. nac", "fecha de nacimiento"]):
         return "FECHA_NACIMIENTO"
-    if "ingreso" in contexto or "admisión" in contexto or "admision" in contexto:
+
+    if any(k in contexto for k in ["ingres", "ingreso", "ingresó", "ingreso el", "fecha de ingreso",
+                                   "admis", "admisión", "admision", "admitido"]):
         return "FECHA_INGRESO"
-    if "alta" in contexto:
+
+    if any(k in contexto for k in ["alta", "alta el", "fecha de alta", "alta hospitalaria"]):
         return "FECHA_ALTA"
 
-    # Si no encontramos contexto claro, la dejamos genérica
     return "FECHA"
+
 
 
 def classify_date_entity_by_context(text: str, start: int, end: int) -> str:
@@ -850,6 +848,9 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
 
         # Texto crudo detectado (antes de normalizar)
         span_raw = texto[start:end]
+        if ent_canon == "EDAD" and not re.search(r"(?:años?|a\.?)\b", span_raw.lower()):
+            continue
+
 
         # Filtro anti-FP para nombres (muy útil en notas cortas)
         if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
@@ -1481,6 +1482,41 @@ def analyze_lenient_vs_strict(gold: pd.DataFrame, pred: pd.DataFrame):
         print(f"[LENIENT-vs-STRICT] % exactos entre los que solapan: {strict_hit/lenient_hit:.3f}")
 
 
+
+def report_by_entity(df_gold_fixed: pd.DataFrame, df_preds: pd.DataFrame):
+    g = add_canonical_to_gold(df_gold_fixed)
+    p = df_preds.copy()
+
+    # STRICT por entidad
+    g["key"] = g["ID"].astype(str)+"|"+g["Start"].astype(str)+"|"+g["End"].astype(str)+"|"+g["Entidad_canon"].astype(str)
+    p["key"] = p["ID"].astype(str)+"|"+p["Start_pred"].astype(str)+"|"+p["End_pred"].astype(str)+"|"+p["Entidad_pred_canon"].astype(str)
+
+    gold_keys = set(g["key"])
+    pred_keys = set(p["key"])
+
+    tp = gold_keys & pred_keys
+    fn = gold_keys - pred_keys
+    fp = pred_keys - gold_keys
+
+    def ent_from_key(k):  # último campo
+        return k.split("|")[-1]
+
+    ents = sorted(set(g["Entidad_canon"]) | set(p["Entidad_pred_canon"]))
+    rows = []
+    for e in ents:
+        TP = sum(1 for k in tp if ent_from_key(k) == e)
+        FN = sum(1 for k in fn if ent_from_key(k) == e)
+        FP = sum(1 for k in fp if ent_from_key(k) == e)
+        prec = TP/(TP+FP) if TP+FP else 0.0
+        rec = TP/(TP+FN) if TP+FN else 0.0
+        f1 = 2*prec*rec/(prec+rec) if prec+rec else 0.0
+        rows.append({"Entidad": e, "TP": TP, "FP": FP, "FN": FN, "Precision": prec, "Recall": rec, "F1": f1})
+
+    out = pd.DataFrame(rows).sort_values(["F1","FN","FP"], ascending=[True, False, False])
+    print("\n[STRICT] Métricas por entidad (peores arriba):")
+    print(out.to_string(index=False))
+
+
 # ========= MAIN =========
 
 if __name__ == "__main__":
@@ -1520,6 +1556,25 @@ if __name__ == "__main__":
 
         # IDs de dispositivo / internos (DEV-..., XK..., etc.)
         Rule(entity="DEVICE_ID", pattern=r"\b(?:DEV|XK)-[A-Z0-9\-]{3,}\b|\bXK\d{4,}\b", replacement="<DEVICE_ID>", obligatorio=False),
+
+                # Fecha de nacimiento (captura fecha tras etiquetas típicas)
+        Rule(
+            entity="FECHA_NACIMIENTO",
+            pattern=r"(?i)\b(?:fecha\s*de\s*nacimiento|nacimiento|nac\.)\s*[:\-]?\s*"
+                    r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b",
+            replacement="<DATE_BIRTH>",
+            obligatorio=False
+        ),
+
+        # Fecha de ingreso / admisión
+        Rule(
+            entity="FECHA_INGRESO",
+            pattern=r"(?i)\b(?:fecha\s*de\s*ingreso|ingreso|admis(?:i[oó]n)?)\s*[:\-]?\s*"
+                    r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b",
+            replacement="<DATE_ADMISSION>",
+            obligatorio=False
+        ),
+
     ]
 
     rules.extend(EXTRA_RULES)
@@ -1536,6 +1591,7 @@ if __name__ == "__main__":
     print(f"Total entidades (eval, sin merge direcciones): {len(all_preds_eval)}")
 
     df_preds = preds_to_dataframe(all_preds_eval)
+    report_by_entity(df_gold_fixed, df_preds)
     analyze_lenient_vs_strict(df_gold_fixed, df_preds)
 
     print("\nPrimeras predicciones (eval):")
