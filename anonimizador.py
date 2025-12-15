@@ -97,6 +97,7 @@ def load_gold(path: str = EXCEL_PATH, sheet_name: str = SHEET_GOLD) -> pd.DataFr
     df["Texto"] = df["Texto"].astype(str)
     return df
 
+
 def sanity_check_gold_offsets(df_textos: pd.DataFrame, df_gold: pd.DataFrame, max_print: int = 20):
     textos = {int(r["ID"]): str(r["Texto"]) for _, r in df_textos.iterrows()}
     bad = []
@@ -255,33 +256,34 @@ def repair_gold_offsets(df_textos: pd.DataFrame, df_gold: pd.DataFrame, max_prin
                     s_new, e_new = m.start(), m.end()
                     status = "REPAIRED_FLEX"
                 else:
-                    # --- Heurística 1: Teléfono solo dígitos (buscar mismos dígitos con separadores) ---
-                    digits = re.sub(r"\D", "", gold_txt)
-                    if len(digits) >= 9:
-                        # patrón: 9\d? con espacios/guiones opcionales entre dígitos
-                        phone_pat = r"\b" + r"[\s\-\.]*".join(list(digits)) + r"\b"
-                        m2 = re.search(phone_pat, full)
-                        if m2:
-                            s_new, e_new = m2.start(), m2.end()
-                            status = "REPAIRED_PHONE"
-                        else:
-                            status = "UNRESOLVED"
-                            s_new, e_new = s0, e0
-                    else:
-                        # --- Heurística 2: Fechas tipo 'YYYY-MM-DD 00:00:00' ---
-                        cands = _date_candidates_from_excel_datetime(gold_txt)
-                        found = False
-                        for c in cands:
-                            occ2 = _find_all_occurrences(full, c)
-                            if occ2:
-                                if 0 <= s0 <= len(full):
-                                    occ2.sort(key=lambda se: abs(se[0] - s0))
-                                s_new, e_new = occ2[0]
-                                status = "REPAIRED_DATE"
-                                found = True
-                                break
+                    # --- Heurística 1: Fechas tipo 'YYYY-MM-DD 00:00:00' (PRIMERO, para que no lo “pise” PHONE) ---
+                    cands = _date_candidates_from_excel_datetime(gold_txt)
+                    found = False
+                    for c in cands:
+                        occ2 = _find_all_occurrences(full, c)
+                        if occ2:
+                            if 0 <= s0 <= len(full):
+                                occ2.sort(key=lambda se: abs(se[0] - s0))
+                            s_new, e_new = occ2[0]
+                            status = "REPAIRED_DATE"
+                            found = True
+                            break
 
-                        if not found:
+                    if not found:
+                        # --- Heurística 2: Teléfono solo dígitos (solo si la ENTIDAD sugiere teléfono) ---
+                        digits = re.sub(r"\D", "", gold_txt)
+                        is_phone_entity = ("tel" in ent.lower()) or ("telefono" in ent.lower()) or ("teléfono" in ent.lower())
+
+                        if is_phone_entity and len(digits) >= 9:
+                            phone_pat = r"\b" + r"[\s\-\.]*".join(list(digits)) + r"\b"
+                            m2 = re.search(phone_pat, full)
+                            if m2:
+                                s_new, e_new = m2.start(), m2.end()
+                                status = "REPAIRED_PHONE"
+                            else:
+                                status = "UNRESOLVED"
+                                s_new, e_new = s0, e0
+                        else:
                             # --- Heurística 3: Email (buscar un email cerca del start original) ---
                             if "mail" in ent.lower() or "correo" in ent.lower() or "email" in ent.lower():
                                 left = max(0, s0 - 80)
@@ -297,13 +299,21 @@ def repair_gold_offsets(df_textos: pd.DataFrame, df_gold: pd.DataFrame, max_prin
                             else:
                                 # Heurística extra: Dirección sin acentos (Alcalá vs Alcala) + espacios
                                 if "direc" in ent.lower() or "calle" in ent.lower() or "territorio" in ent.lower():
+                                    # 1) intenta match sin acentos tal cual
                                     hit = _find_accent_insensitive(full, gold_txt)
                                     if hit:
                                         s_new, e_new = hit
                                         status = "REPAIRED_ADDR_NOACC"
                                     else:
-                                        status = "UNRESOLVED"
-                                        s_new, e_new = s0, e0
+                                        # 2) intenta con espacio opcional tras '/'
+                                        gold_txt2 = gold_txt.replace("C/", "C/ ").replace("c/", "c/ ")
+                                        hit2 = _find_accent_insensitive(full, gold_txt2)
+                                        if hit2:
+                                            s_new, e_new = hit2
+                                            status = "REPAIRED_ADDR_NOACC"
+                                        else:
+                                            status = "UNRESOLVED"
+                                            s_new, e_new = s0, e0
                                 else:
                                     status = "UNRESOLVED"
                                     s_new, e_new = s0, e0
@@ -342,7 +352,7 @@ def repair_gold_offsets(df_textos: pd.DataFrame, df_gold: pd.DataFrame, max_prin
     df_gold_fixed = pd.DataFrame(repaired_rows)
     df_report = pd.DataFrame(report)
 
-    repaired = df_report[df_report["Status"].isin(["REPAIRED_EXACT", "REPAIRED_FLEX"])]
+    repaired = df_report[df_report["Status"].str.startswith("REPAIRED")]
     unresolved = df_report[df_report["Status"] == "UNRESOLVED"]
 
     print(f"\n[GOLD REPAIR] total={len(df_report)} repaired={len(repaired)} unresolved={len(unresolved)}")
