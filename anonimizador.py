@@ -22,7 +22,7 @@ NER_SCORE_THRESHOLD = 0.80
 NER_SCORE_BY_ENTITY = {
     # En de-ID suele interesar recall alto en NOMBRE/DIRECCION
     "NOMBRE_PACIENTE": 0.50,
-    "NOMBRE_PROFESIONAL": 0.50,
+    "NOMBRE_PROFESIONAL": 0.70,
     "HOSPITAL": 0.60,
     "DIRECCION": 0.60,
     # Formatos/IDs suelen ser más “fáciles”, podemos exigir más
@@ -576,7 +576,7 @@ PREFIX_BY_ENTITY = {
     "TELEFONO": [r"tel(?:éfono)?[:\s]*", r"tlf[:\s]*", r"tfno[:\s]*"],
     "EMAIL": [r"correo(?:\s+electr[oó]nico)?[:\s]*", r"email[:\s]*", r"e-?mail[:\s]*"],
     "DNI_NIF": [r"dni[:\s]*", r"nif[:\s]*"],
-    "NHC": [r"(?:n[º°]\s*)?historia\s+cl[ií]nica[:\s-]*", r"nhc[:\s-]*", r"hc[:\s-]*"],
+    "NHC": [r"(?:n[º°]\s*)?historia\s+cl[ií]nica[:\s-]*", r"nhc[:\s-]*"],
     "IP": [r"ip[:\s]*", r"direcci[oó]n\s+ip[:\s]*"],
     "DIRECCION": [r"dir(?:ecci[oó]n)?[:\s]*", r"domicilio[:\s]*"],
 }
@@ -1403,7 +1403,7 @@ if __name__ == "__main__":
     # Reglas extra “mínimas” para notas cortas del Excel (IDs que aparecen en el GOLD)
     EXTRA_RULES = [
         # NHC / MRN
-        Rule(entity="NHC", pattern=r"\b(?:HC|MRN)-?\s*[A-Z0-9]{4,}\b", replacement="<MRN>", obligatorio=True),
+        Rule(entity="NHC", pattern=r"\b(?:HC|MRN)\s*[:\-]?\s*((?:HC|MRN)-?[A-Z0-9]{4,})\b", replacement="<MRN>", obligatorio=True),
 
         # ID Seguro / INS
         Rule(entity="INSURANCE_ID", pattern=r"\bINS-?\s*\d{2,}(?:-\d{2,})+\b", replacement="<INSURANCE_ID>", obligatorio=True),
