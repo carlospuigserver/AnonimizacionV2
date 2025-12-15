@@ -395,10 +395,19 @@ def canonicalize_entity_name(name: str) -> str:
     if ("nombre" in t and ("profesional" in t or "médico" in t or "medico" in t)) \
        or "nombre_personal_sanitario" in t:
         return "NOMBRE_PROFESIONAL"
+    
+    if "historia clínica" in t or "historia clinica" in t or "nhc" in t or "mrn" in t:
+        return "NHC"
+    
+    if t_raw.upper() in {"HC"}:
+        return "NHC"
+
+    
 
     # --- Hospital / institución ---
     if t_raw.upper() in {"HOSPITL"}:
         return "HOSPITAL"
+
 
     if "hospital" in t or "clínica" in t or "clinica" in t \
        or "institución" in t or "institucion" in t:
@@ -438,11 +447,7 @@ def canonicalize_entity_name(name: str) -> str:
     if "dni" in t or "nif" in t or "id_sujeto_asistencia" in t:
         return "DNI_NIF"
 
-    if "historia clínica" in t or "historia clinica" in t or "nhc" in t or "mrn" in t:
-        return "NHC"
-    
-    if t_raw.upper() in {"HC"}:
-        return "NHC"
+   
 
 
     if "aseguramiento" in t or "seguro" in t or t_raw.upper() == "ID_ASEGURAMIENTO":
