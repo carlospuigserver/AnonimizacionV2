@@ -150,11 +150,11 @@ def _flexible_whitespace_pattern(s: str) -> str:
 
 def _date_candidates_from_excel_datetime(s: str) -> List[str]:
     """
-    Si viene 'YYYY-MM-DD 00:00:00', genera candidatos típicos:
-    - 'YYYY-MM-DD'
-    - 'DD/MM/YYYY' (con y sin ceros)
-    - 'D/M/YYYY' variantes con ceros en día o mes
-    - 'DD/MM/YY' (año 2 dígitos) con y sin ceros
+    Si viene 'YYYY-MM-DD 00:00:00', genera candidatos típicos en ambos órdenes:
+    - YYYY-MM-DD
+    - DD/MM/YYYY y variantes
+    - MM/DD/YYYY y variantes
+    - con año 2 dígitos (YY)
     """
     s = str(s).strip()
     m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})\s+\d{2}:\d{2}:\d{2}", s)
@@ -166,20 +166,31 @@ def _date_candidates_from_excel_datetime(s: str) -> List[str]:
     mo_i = int(mo)
     y2 = y[-2:]
 
-    # Variantes útiles
-    cands = [
-        f"{y}-{mo}-{d}",              # 2026-03-03
-
-        f"{d}/{mo}/{y}",              # 03/03/2026
-        f"{d_i}/{mo_i}/{y}",          # 3/3/2026
-        f"{d_i}/{mo}/{y}",            # 3/03/2026
-        f"{d}/{mo_i}/{y}",            # 03/3/2026
-
-        f"{d}/{mo}/{y2}",             # 03/03/26
-        f"{d_i}/{mo_i}/{y2}",         # 3/3/26
-        f"{d_i}/{mo}/{y2}",           # 3/03/26
-        f"{d}/{mo_i}/{y2}",           # 03/3/26
+    # Orden 1: DD/MM/YYYY
+    ddmmYYYY = [
+        f"{d}/{mo}/{y}",              # 06/08/1990
+        f"{d_i}/{mo_i}/{y}",          # 6/8/1990
+        f"{d_i}/{mo}/{y}",            # 6/08/1990
+        f"{d}/{mo_i}/{y}",            # 06/8/1990
+        f"{d}/{mo}/{y2}",             # 06/08/90
+        f"{d_i}/{mo_i}/{y2}",         # 6/8/90
+        f"{d_i}/{mo}/{y2}",           # 6/08/90
+        f"{d}/{mo_i}/{y2}",           # 06/8/90
     ]
+
+    # Orden 2: MM/DD/YYYY (día/mes invertidos)
+    mmddYYYY = [
+        f"{mo}/{d}/{y}",              # 08/06/1990
+        f"{mo_i}/{d_i}/{y}",          # 8/6/1990
+        f"{mo_i}/{d}/{y}",            # 8/06/1990
+        f"{mo}/{d_i}/{y}",            # 08/6/1990
+        f"{mo}/{d}/{y2}",             # 08/06/90
+        f"{mo_i}/{d_i}/{y2}",         # 8/6/90
+        f"{mo_i}/{d}/{y2}",           # 8/06/90
+        f"{mo}/{d_i}/{y2}",           # 08/6/90
+    ]
+
+    cands = [f"{y}-{mo}-{d}"] + ddmmYYYY + mmddYYYY
 
     # Quita duplicados manteniendo orden
     out = []
@@ -189,6 +200,7 @@ def _date_candidates_from_excel_datetime(s: str) -> List[str]:
             out.append(c)
             seen.add(c)
     return out
+
 
 import unicodedata
 
@@ -566,6 +578,50 @@ def is_probable_dni_or_id(text: str) -> bool:
     raw = re.sub(r"[^A-Za-z0-9]", "", text)
     return len(raw) >= 6
 
+COMMON_NON_NAME_TOKENS = {
+    "hospital", "clínica", "clinica", "servicio", "unidad", "urgencias",
+    "consulta", "paciente", "doctor", "doctora", "dra", "dr",
+    "fecha", "ingreso", "alta", "diagnóstico", "diagnostico"
+}
+
+def is_probable_person_name(span: str) -> bool:
+    """
+    Heurística para bajar FP en NOMBRE_*:
+    - sin dígitos
+    - al menos 2 tokens (nombre + apellido)
+    - tokens empiezan por mayúscula (permitiendo acentos)
+    - evita palabras clínicas frecuentes
+    """
+    s = span.strip()
+    if not s:
+        return False
+    if any(ch.isdigit() for ch in s):
+        return False
+
+    # normaliza separadores y quita títulos típicos
+    s = re.sub(r"\s+", " ", s)
+    s_low = s.lower().strip(".:,; ")
+
+    # elimina prefijos Dr/Dra si vienen pegados
+    s_low = re.sub(r"^(dr|dra)\.?\s+", "", s_low, flags=re.IGNORECASE)
+
+    toks = [t for t in s.split() if t.strip()]
+    if len(toks) < 2:
+        return False
+
+    # si contiene tokens clínicos típicos, descartamos
+    if any(t.lower().strip(".:,;") in COMMON_NON_NAME_TOKENS for t in toks):
+        return False
+
+    # tokens "tipo nombre": empiezan por mayúscula y son letras (permitimos guiones)
+    for t in toks:
+        t_clean = t.strip(".:,;")
+        if not t_clean:
+            return False
+        if not re.match(r"^[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+$", t_clean):
+            return False
+
+    return True
 
 
 # ========= NORMALIZACIÓN DE SPANS (mejora strict en notas cortas) =========
@@ -576,7 +632,12 @@ PREFIX_BY_ENTITY = {
     "TELEFONO": [r"tel(?:éfono)?[:\s]*", r"tlf[:\s]*", r"tfno[:\s]*"],
     "EMAIL": [r"correo(?:\s+electr[oó]nico)?[:\s]*", r"email[:\s]*", r"e-?mail[:\s]*"],
     "DNI_NIF": [r"dni[:\s]*", r"nif[:\s]*"],
-    "NHC": [r"(?:n[º°]\s*)?historia\s+cl[ií]nica[:\s-]*", r"nhc[:\s-]*"],
+    "NHC": [
+    r"(?:n[º°]\s*)?historia\s+cl[ií]nica[:\s-]*",
+    r"nhc[:\s-]*",
+    r"hc[:\s-]*",
+    ],
+
     "IP": [r"ip[:\s]*", r"direcci[oó]n\s+ip[:\s]*"],
     "DIRECCION": [r"dir(?:ecci[oó]n)?[:\s]*", r"domicilio[:\s]*"],
 }
@@ -615,6 +676,21 @@ def normalize_span(text: str, start: int, end: int, ent_canon: str) -> tuple[int
         s += 1
     while e > s and text[e - 1] in TRIM_CHARS:
         e -= 1
+
+
+        # 4) Ajuste específico EDAD: recorta sufijos tipo "años", "a.", "a"
+    if ent_canon == "EDAD":
+        span2 = text[s:e]
+        m_age = re.match(r"^\s*(\d{1,3})\s*(?:años?|a\.?)?\s*$", span2, flags=re.IGNORECASE)
+        if m_age:
+            # dejamos solo el número
+            num = m_age.group(1)
+            # recalcula e para que acabe justo al final del número dentro del span actual
+            num_pos = span2.find(num)
+            if num_pos != -1:
+                s = s + num_pos
+                e = s + len(num)
+
 
     return s, e
 
@@ -775,6 +851,12 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         # Texto crudo detectado (antes de normalizar)
         span_raw = texto[start:end]
 
+        # Filtro anti-FP para nombres (muy útil en notas cortas)
+        if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
+            if not is_probable_person_name(span_raw):
+                continue
+
+
         # Si es fecha genérica, clasificar por contexto
         if ent_canon in {"FECHA", "FECHAS"}:
             ent_canon = classify_date_entity(texto, start, end)
@@ -820,11 +902,20 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
         pattern = re.compile(rule.pattern, flags=re.IGNORECASE)
 
         for m in pattern.finditer(texto):
-            # Si el regex tiene grupo 1, usa ese span (permite capturar sólo el valor)
+            # Si el regex tiene grupos, usa el PRIMERO que realmente haya matcheado (no siempre es el 1)
             if m.lastindex and m.lastindex >= 1:
-                start, end = m.start(1), m.end(1)
+                gidx = None
+                for gi in range(1, m.lastindex + 1):
+                    if m.group(gi) is not None:
+                        gidx = gi
+                        break
+                if gidx is not None:
+                    start, end = m.start(gidx), m.end(gidx)
+                else:
+                    start, end = m.start(), m.end()
             else:
                 start, end = m.start(), m.end()
+
 
             ent_canon = canonicalize_entity_name(rule.entity)
 
@@ -963,6 +1054,19 @@ def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline) -
 
         preds_combined = merge_predictions(preds_ner, preds_regex)
         preds_combined = resolve_overlaps_global(preds_combined)
+        if tid == 4:
+            print("\n[DEBUG ID=4] preds_ner:")
+            for p in preds_ner:
+                print(p.entity, p.start, p.end, repr(p.text))
+
+            print("\n[DEBUG ID=4] preds_regex:")
+            for p in preds_regex:
+                print(p.entity, p.start, p.end, repr(p.text))
+
+            print("\n[DEBUG ID=4] preds_final:")
+            for p in preds_combined:
+                print(p.entity, p.start, p.end, repr(p.text))
+
 
         # Si tienes merge_nearby_same_entity definido, úsalo (en tu script sí está)
         preds_combined = merge_nearby_same_entity(preds_combined, ttext, entity="DIRECCION", max_gap=3)
@@ -1403,7 +1507,12 @@ if __name__ == "__main__":
     # Reglas extra “mínimas” para notas cortas del Excel (IDs que aparecen en el GOLD)
     EXTRA_RULES = [
         # NHC / MRN
-        Rule(entity="NHC", pattern=r"\b(?:HC|MRN)\s*[:\-]?\s*((?:HC|MRN)-?[A-Z0-9]{4,})\b", replacement="<MRN>", obligatorio=True),
+        Rule(
+            entity="NHC",
+            pattern=r"\b(?:N[º°]\s*)?Historia\s+Cl[ií]nica[:\s-]*((?:HC)-?[A-Z0-9]{4,})\b|\b((?:MRN)-?[A-Z0-9]{4,})\b|\b((?:HC)-?[A-Z0-9]{4,})\b",
+            replacement="<MRN>",
+            obligatorio=True
+        ),
 
         # ID Seguro / INS
         Rule(entity="INSURANCE_ID", pattern=r"\bINS-?\s*\d{2,}(?:-\d{2,})+\b", replacement="<INSURANCE_ID>", obligatorio=True),
