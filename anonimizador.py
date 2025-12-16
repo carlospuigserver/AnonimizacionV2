@@ -1095,12 +1095,14 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
             )
         )
 
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
     # FALLBACK: Nombre al inicio tipo "Roberto Sánchez, ..."
-    # Solo si el NER NO detectó ningún nombre en este texto.
+    # Ejecutarlo si NO se detectó ningún NOMBRE_PACIENTE en este texto
+    # (aunque sí haya NOMBRE_PROFESIONAL detectados).
     # ------------------------------------------------------------------
-    has_any_name = any(p.entity in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"} for p in preds)
-    if not has_any_name:
+    has_patient_name = any(p.entity == "NOMBRE_PACIENTE" for p in preds)
+
+    if not has_patient_name:
         m = re.search(
             r"^\s*([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+)+)(?=,)",
             texto
@@ -1109,7 +1111,7 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
             s, e = m.start(1), m.end(1)
             candidate = texto[s:e]
             if is_probable_person_name(candidate):
-                ent_canon = classify_person_role_by_context(texto, s, e, default="NOMBRE_PACIENTE")
+                ent_canon = "NOMBRE_PACIENTE"  # al inicio, por defecto paciente
 
                 ns, ne = normalize_span(texto, s, e, ent_canon)
                 ns, ne = expand_span_left_titles(texto, ns, ne, ent_canon)
@@ -1121,9 +1123,10 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
                             end=ne,
                             entity=ent_canon,
                             text=texto[ns:ne],
-                            score=0.35,  # score “sintético” (fallback)
+                            score=0.35,  # score “sintético”
                         )
                     )
+
 
     return preds
 
