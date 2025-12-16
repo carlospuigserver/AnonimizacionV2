@@ -683,6 +683,27 @@ def is_probable_person_name(span: str) -> bool:
     return True
 
 
+TITLE_STRONG_LEFT = re.compile(
+    r"(?:\bSr\.?|\bSra\.?|\bDr\.?|\bDra\.?)\s*$",
+    re.IGNORECASE
+)
+
+def is_single_surname_with_title(text: str, start: int, span: str) -> bool:
+    """
+    Acepta apellidos únicos SOLO si van precedidos de un título fuerte:
+    'Sr. Sánchez', 'Dr. Pérez', etc.
+    """
+    if len(span.split()) != 1:
+        return False
+
+    if not re.match(r"^[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ\-']+$", span):
+        return False
+
+    left = text[max(0, start - 10):start]
+    return bool(TITLE_STRONG_LEFT.search(left))
+
+
+
 # Normalización de spans
 
 TRIM_CHARS = " \t\n\r,;:.-()[]{}\"'"
@@ -930,6 +951,25 @@ def get_extra_rules() -> List[Rule]:
             replacement="<DATE_ADMISSION>",
             obligatorio=False
         ),
+
+
+
+                # Sr./Sra. + Apellido (mención abreviada típica) -> paciente
+        Rule(
+            entity="NOMBRE_PACIENTE",
+            pattern=r"\b(?:Sr\.?|Sra\.?)\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']{2,})\b",
+            replacement="<PATIENT_NAME>",
+            obligatorio=False
+        ),
+
+        # Dr./Dra. + Apellido (mención abreviada típica) -> profesional
+        Rule(
+            entity="NOMBRE_PROFESIONAL",
+            pattern=r"\b(?:Dr\.?|Dra\.?)\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']{2,})\b",
+            replacement="<PROVIDER_NAME>",
+            obligatorio=False
+        ),
+
     ]
 
 
@@ -1011,7 +1051,10 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         # Filtro anti-FP para nombres
         if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
             if not is_probable_person_name(span_raw):
-                continue
+                # Permitimos apellido único SOLO si va con título (Sr./Dr.)
+                if not is_single_surname_with_title(texto, start, span_raw):
+                    continue
+
 
         # Resolver PACIENTE vs PROFESIONAL por contexto
         if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
@@ -1134,6 +1177,12 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
                 continue
             if ent_canon == "IP" and not looks_like_ip(span_text):
                 continue
+            # ---- FIX: aceptar apellido único solo con título (Sr./Dr.) ----
+            if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
+                if not is_probable_person_name(span_text):
+                    if not is_single_surname_with_title(texto, ns, span_text):
+                        continue
+
 
             preds.append(
                 Prediction(
