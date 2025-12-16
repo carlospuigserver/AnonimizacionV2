@@ -596,13 +596,19 @@ def is_valid_phone(text: str) -> bool:
 
 DNI_REGEX = re.compile(r"\b\d{8}[A-HJ-NP-TV-Z]\b", re.IGNORECASE)
 
-
 def is_probable_dni_or_id(text: str) -> bool:
-    
+    # Evita que un pasaporte (ES1234567, ABC123456) se clasifique como DNI
+    if re.search(r"\b[A-Z]{2,3}\d{6,9}\b", text):
+        return False
+
+    # DNI español estándar
     if DNI_REGEX.search(text):
         return True
+
+    # Fallback genérico para otros IDs
     raw = re.sub(r"[^A-Za-z0-9]", "", text)
     return len(raw) >= 6
+
 
 COMMON_NON_NAME_TOKENS = {
     "hospital", "clínica", "clinica", "servicio", "unidad", "urgencias",
@@ -690,6 +696,7 @@ PREFIX_BY_ENTITY = {
     r"nhc[:\s-]*",
     
     ],
+    "DEVICE_ID": [ r"dispositivo[:\s]*",r"device[:\s]*"],
 
     "IP": [r"ip[:\s]*", r"direcci[oó]n\s+ip[:\s]*"],
     "DIRECCION": [r"dir(?:ecci[oó]n)?[:\s]*", r"domicilio[:\s]*"],
@@ -862,6 +869,81 @@ def build_rules_from_guidelines(df: pd.DataFrame) -> List[Rule]:
         )
 
     return rules
+
+
+
+
+
+def get_extra_rules() -> List[Rule]:
+    """
+    Reglas extra “mínimas” que complementan Guidelines.
+    Úsalas tanto en el main como en notas sintéticas para consistencia.
+    """
+    return [
+        # NHC / MRN
+        Rule(
+            entity="NHC",
+            pattern=r"\b(?:N[º°]\s*)?Historia\s+Cl[ií]nica[:\s-]*((?:HC)-?[A-Z0-9]{4,})\b|\b((?:MRN)-?[A-Z0-9]{4,})\b|\b((?:HC)-?[A-Z0-9]{4,})\b",
+            replacement="<MRN>",
+            obligatorio=True
+        ),
+
+        # ID Seguro / INS
+        Rule(
+            entity="INSURANCE_ID",
+            pattern=r"\bINS-?\s*\d{2,}(?:-\d{2,})+\b",
+            replacement="<INSURANCE_ID>",
+            obligatorio=True
+        ),
+
+        # IDs de dispositivo / internos (DEV-..., XK..., etc.)
+        Rule(
+            entity="DEVICE_ID",
+            pattern=r"\bDEV-[A-Z0-9\-]{3,}\b|\bXK-[A-Z0-9\-]{3,}\b",
+            replacement="<DEVICE_ID>",
+            obligatorio=False
+        ),
+
+        # Fecha de nacimiento (captura fecha tras etiquetas típicas)
+        Rule(
+            entity="FECHA_NACIMIENTO",
+            pattern=r"(?i)\b(?:fecha\s*de\s*nacimiento|nacimiento|fnac|f\.\s*nac|nac\.|naci[oó]|nacido|nacida)\b"
+                    r"[^0-9]{0,15}"
+                    r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b",
+            replacement="<DATE_BIRTH>",
+            obligatorio=False
+        ),
+
+        # Pasaporte (evita DNI)
+        Rule(
+            entity="PASAPORTE",
+            pattern=r"\b(?!\d{8}[A-HJ-NP-TV-Z]\b)([A-Z]{2,3}\d{6,9}|\d{6,9}[A-Z]{2,3})\b",
+            replacement="<PASSPORT>",
+            obligatorio=False
+        ),
+
+        # Fecha de ingreso / admisión
+        Rule(
+            entity="FECHA_INGRESO",
+            pattern=r"(?i)\b(?:fecha\s*de\s*ingreso|ingreso|admis(?:i[oó]n)?)\s*[:\-]?\s*"
+                    r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b",
+            replacement="<DATE_ADMISSION>",
+            obligatorio=False
+        ),
+    ]
+
+
+def build_all_rules(df_guidelines: pd.DataFrame) -> List[Rule]:
+    """
+    Construye TODAS las reglas: las de Guidelines + EXTRA_RULES.
+    """
+    rules = build_rules_from_guidelines(df_guidelines)
+    rules.extend(get_extra_rules())
+    return rules
+
+
+
+
 
 
 # NER MEDDOCAN 
@@ -1107,14 +1189,14 @@ def merge_predictions(preds_a: List[Prediction], preds_b: List[Prediction]) -> L
 
 
 ENTITY_PRIORITY = {
+    "INSURANCE_ID": 110,
     "DNI_NIF": 100,
+    "PASAPORTE": 98,
     "NHC": 95,
-    "INSURANCE_ID": 90,
+    "DEVICE_ID": 90,
     "EMAIL": 85,
     "TELEFONO": 85,
     "IP": 80,
-    "PASAPORTE": 76,
-    "DEVICE_ID": 75,
     "NOMBRE_PACIENTE": 70,
     "NOMBRE_PROFESIONAL": 70,
     "FECHA_NACIMIENTO": 60,
@@ -1660,69 +1742,11 @@ if __name__ == "__main__":
     print("Guidelines cargados:")
     print(df_guidelines.head())
 
-    # 2) Construir reglas regex
-    rules = build_rules_from_guidelines(df_guidelines)
-    print(f"\nSe han construido {len(rules)} reglas regex.")
 
-    # Reglas extra “mínimas” para notas cortas del Excel (IDs que aparecen en el GOLD)
-    EXTRA_RULES = [
-        # NHC / MRN
-        Rule(
-            entity="NHC",
-            pattern=r"\b(?:N[º°]\s*)?Historia\s+Cl[ií]nica[:\s-]*((?:HC)-?[A-Z0-9]{4,})\b|\b((?:MRN)-?[A-Z0-9]{4,})\b|\b((?:HC)-?[A-Z0-9]{4,})\b",
-            replacement="<MRN>",
-            obligatorio=True
-        ),
+    # 2) Construir reglas regex (Guidelines + EXTRA_RULES)
+    rules = build_all_rules(df_guidelines)
+    print(f"\nTotal reglas regex (Guidelines + Extra): {len(rules)}")
 
-        # ID Seguro / INS
-        Rule(entity="INSURANCE_ID", pattern=r"\bINS-?\s*\d{2,}(?:-\d{2,})+\b", replacement="<INSURANCE_ID>", obligatorio=True),
-
-        # IDs de dispositivo / internos (DEV-..., XK..., etc.)
-        Rule(
-            entity="DEVICE_ID",
-            pattern=r"\bDEV-[A-Z0-9\-]{3,}\b|\bXK-[A-Z0-9\-]{3,}\b",
-            replacement="<DEVICE_ID>",
-            obligatorio=False
-        ),
-
-
-          
-        # Fecha de nacimiento (captura fecha tras etiquetas típicas)
-        Rule(
-            entity="FECHA_NACIMIENTO",
-            pattern=r"(?i)\b(?:fecha\s*de\s*nacimiento|nacimiento|fnac|f\.\s*nac|nac\.|naci[oó]|nacido|nacida)\b"
-                    r"[^0-9]{0,15}"
-                    r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b",
-            replacement="<DATE_BIRTH>",
-            obligatorio=False
-        ),
-
-        
-
-        Rule(
-            entity="PASAPORTE",
-            pattern=r"\b(?!\d{8}[A-HJ-NP-TV-Z]\b)([A-Z]{2,3}\d{6,9}|\d{6,9}[A-Z]{2,3})\b",
-            replacement="<PASSPORT>",
-            obligatorio=False
-        ),
-
-
-
-
-
-        # Fecha de ingreso / admisión
-        Rule(
-            entity="FECHA_INGRESO",
-            pattern=r"(?i)\b(?:fecha\s*de\s*ingreso|ingreso|admis(?:i[oó]n)?)\s*[:\-]?\s*"
-                    r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b",
-            replacement="<DATE_ADMISSION>",
-            obligatorio=False
-        ),
-
-    ]
-
-    rules.extend(EXTRA_RULES)
-    print(f"Reglas extra añadidas: {len(EXTRA_RULES)}. Total reglas: {len(rules)}")
 
 
     # 3) Cargar modelo NER
