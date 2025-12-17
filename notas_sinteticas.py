@@ -25,6 +25,7 @@ from anonimizador import (
     # constantes
     OUTPUT_EXCEL,
 )
+OUTPUT_EXCEL_SYNTH = "Resultados_Anonimizador_Hibrido_v3_con_sinteticas.xlsx"
 
 
 # =====================================================
@@ -163,18 +164,26 @@ def main():
     print("Detectando entidades (NER + regex)...")
     all_preds = detect_all_texts(df_textos, rules, ner_pipe, merge_address=True)
     df_preds = preds_to_dataframe(all_preds)
+    # =====================================================
+    # FILTRAR PREDICCIONES SOLO A TEXTOS REALES (PARA MÉTRICAS)
+    # =====================================================
+    real_ids = set(df_gold_fixed["ID"].unique())
+    df_preds_real = df_preds[df_preds["ID"].isin(real_ids)].copy()
+
 
     print("Anonimizando textos...")
     df_anon = anonymize_all_texts(df_textos, all_preds, rules)
 
     print("Evaluando (solo textos reales)...")
-    matching_strict, metrics_strict = evaluate_strict(df_gold_fixed, df_preds)
-    matching_lenient, metrics_lenient = evaluate_lenient(df_gold_fixed, df_preds)
+    matching_strict, metrics_strict = evaluate_strict(df_gold_fixed, df_preds_real)
+    matching_lenient, metrics_lenient = evaluate_lenient(df_gold_fixed, df_preds_real)
 
-    print(f"Guardando resultados en {OUTPUT_EXCEL}")
-    with pd.ExcelWriter(OUTPUT_EXCEL, engine="openpyxl") as writer:
+
+    print(f"Guardando resultados en {OUTPUT_EXCEL_SYNTH}")
+    with pd.ExcelWriter(OUTPUT_EXCEL_SYNTH, engine="openpyxl") as writer:
         df_textos.to_excel(writer, sheet_name="Datos_Originales", index=False)
-        df_preds.to_excel(writer, sheet_name="Predicciones_Modelo", index=False)
+        df_preds.to_excel(writer, sheet_name="Predicciones_TODAS", index=False)
+        df_preds_real.to_excel(writer, sheet_name="Predicciones_REALES", index=False)
         df_anon.to_excel(writer, sheet_name="Textos_Anonimizados", index=False)
         matching_strict.to_excel(writer, sheet_name="Validacion_Strict", index=False)
         matching_lenient.to_excel(writer, sheet_name="Validacion_Lenient", index=False)

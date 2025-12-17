@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-PATH = "Resultados_Anonimizador_Hibrido_v3.xlsx"
+PATH = "Resultados_Anonimizador_Hibrido_v3_con_sinteticas.xlsx"
 
 @st.cache_data
 def load_data(path: str):

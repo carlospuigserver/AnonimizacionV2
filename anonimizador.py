@@ -404,12 +404,34 @@ def canonicalize_entity_name(name: str) -> str:
     if "hospital" in t or "clínica" in t or "clinica" in t \
        or "institución" in t or "institucion" in t:
         return "HOSPITAL"
+    
+        # Dirección / CP / Ciudad / País (SEPARADOS)
+    if "código postal" in t or "codigo postal" in t or t_raw.upper() in {"CP", "CODIGO_POSTAL"}:
+        return "CODIGO_POSTAL"
 
-    # Dirección
-    if "dirección" in t or "direccion" in t or "calle" in t or "territorio" in t \
-       or "código postal" in t or "codigo postal" in t or "ciudad" in t \
-       or "provincia" in t:
+    if "ciudad" in t or "provincia" in t:
+        return "CIUDAD"
+
+    if "país" in t or "pais" in t:
+        return "PAIS"
+
+    if "dirección" in t or "direccion" in t or "calle" in t or "territorio" in t:
         return "DIRECCION"
+
+    # Servicio/Unidad
+    if "servicio" in t or "unidad" in t:
+        return "SERVICIO_UNIDAD"
+
+    # Sexo
+    if "sexo" in t or "género" in t or "genero" in t:
+        return "SEXO"
+
+    # Organización empleadora
+    if "organización empleadora" in t or "organizacion empleadora" in t or "empleadora" in t or "empresa" in t:
+        return "ORGANIZACION_EMPLEADORA"
+
+
+  
 
     # Teléfono
     if "teléfono" in t or "telefono" in t or "numero_telefono" in t:
@@ -468,6 +490,83 @@ IP_REGEX = re.compile(r"\b\d{1,3}(\.\d{1,3}){3}\b")
 def looks_like_ip(text: str) -> bool:
     return IP_REGEX.search(text) is not None
 
+# =========================
+# NUEVAS ENTIDADES (22) + VALIDADORES FINOS
+# =========================
+
+# CP español real: 01000..52999
+CP_ES_REGEX = re.compile(r"\b(0[1-9]|[1-4]\d|5[0-2])\d{3}\b")
+
+COUNTRY_WHITELIST = {
+    "españa", "espana", "portugal", "francia", "italia", "alemania",
+    "reino unido", "marruecos", "andorra"
+}
+
+ADDRESS_CONTEXT_MARKERS = [
+    "cp", "código postal", "codigo postal",
+    "c/", "calle", "av", "avenida", "paseo", "plaza", "pza",
+    "domicilio", "dirección", "direccion", "reside", "vive en"
+]
+
+def is_valid_codigo_postal(span: str, ctx: str | None = None) -> bool:
+    s = span.strip()
+    if not CP_ES_REGEX.fullmatch(s):
+        return False
+    if ctx:
+        c = ctx.lower()
+        # exige señales de dirección alrededor para bajar FP (TA 150/95, etc.)
+        if not any(k in c for k in ADDRESS_CONTEXT_MARKERS):
+            return False
+    return True
+
+def is_plausible_city(span: str) -> bool:
+    s = span.strip()
+    if not s or any(ch.isdigit() for ch in s):
+        return False
+    # 1-4 tokens, empieza por mayúscula, evita tokens raros
+    toks = [t for t in re.split(r"\s+", s) if t]
+    if not (1 <= len(toks) <= 4):
+        return False
+    if not s[0].isupper():
+        return False
+    # no demasiado corto / raro
+    if len(s) < 3:
+        return False
+    return True
+
+def is_plausible_country(span: str) -> bool:
+    s = span.strip().lower()
+    return s in COUNTRY_WHITELIST
+
+def is_plausible_service_unit(span: str) -> bool:
+    s = span.strip()
+    if not s:
+        return False
+    if len(s) > 80:
+        return False
+    return True
+
+def is_plausible_sex(span: str) -> bool:
+    s = span.strip().lower()
+    return s in {"mujer", "hombre", "varón", "varon"}
+
+def is_plausible_employer_org(span: str) -> bool:
+    s = span.strip()
+    if not s or any(ch.isdigit() for ch in s):
+        # puedes permitir dígitos si quieres S.A. / 2020 etc; yo aquí lo dejo conservador
+        pass
+    if len(s) < 3 or len(s) > 80:
+        return False
+    # exige "forma" de organización (dos palabras o contiene SL/SA/Banco/Hospital/etc.)
+    s_low = s.lower()
+    if any(k in s_low for k in ["s.l", "s.a", "sl", "sa", "banco", "hospital", "clínica", "clinica", "universidad", "empresa", "grupo"]):
+        return True
+    # o al menos 2 tokens con mayúscula inicial
+    toks = s.split()
+    if len(toks) >= 2 and all(t[0].isupper() for t in toks if t):
+        return True
+    return False
+
 
 def classify_date_entity(full_text: str, start: int, end: int) -> str:
     window_left = full_text[max(0, start - 80):start].lower()
@@ -504,6 +603,13 @@ def classify_person_role_by_context(full_text: str, start: int, end: int, defaul
     left = full_text[max(0, start - 40):start].lower()
     right = full_text[end:end + 60].lower()
     ctx = left + " " + right
+
+    # Forzar por títulos (regla dura)
+    if any(k in ctx for k in ["sr.", "sra.", "señor", "señora"]):
+        return "NOMBRE_PACIENTE"
+    if any(k in ctx for k in ["dr.", "dra.", "doctor", "doctora"]):
+        return "NOMBRE_PROFESIONAL"
+
 
     # 1) Señales de profesional
     if any(k in ctx for k in ["dr.", "dra.", "doctor", "doctora", "médico", "medico"]):
@@ -554,28 +660,41 @@ SPANISH_PROVINCES = {
 
 
 def refine_address_entity(text: str, start: int, end: int, base_entity: str) -> str:
-    
+    """
+    Refina spans que llegan como DIRECCION para reclasificar:
+      - 28013 -> CODIGO_POSTAL
+      - Madrid -> CIUDAD
+      - España -> PAIS
+    Devuelve SIEMPRE entidad CANÓNICA.
+    """
     span = text[start:end].strip()
     span_l = span.lower()
 
-    # Código postal español
+    # CP español
     if re.fullmatch(r"\d{5}", span):
-        return "Código Postal"
+        left = max(0, start - 40)
+        right = min(len(text), end + 40)
+        ctx = text[left:right]
+        return "CODIGO_POSTAL" if is_valid_codigo_postal(span, ctx) else base_entity
 
-    # Provincia (si coincide exactamente con una provincia)
+    # País (whitelist)
+    if is_plausible_country(span):
+        return "PAIS"
+
+    # Provincia/Ciudad (heurística conservadora)
     if span_l in SPANISH_PROVINCES:
-        return "Provincia"
+        return "CIUDAD"
 
-    # Ciudad: heurística muy sencilla
-    if base_entity.lower() == "dirección" and len(span.split()) == 1 and span[0].isupper():
-        return "Ciudad"
+    # Ciudad suelta tipo "Madrid" cerca de CP o en contexto dirección
+    if is_plausible_city(span):
+        left = max(0, start - 40)
+        right = min(len(text), end + 40)
+        ctx = text[left:right].lower()
+        if any(k in ctx for k in ["cp", "código postal", "codigo postal"]) or re.search(r"\b\d{5}\b", ctx):
+            return "CIUDAD"
 
-    # Calle (si contiene "c/", "calle", "av.", "avenida", "paseo"...)
-    if any(pref in span_l for pref in ["c/", "calle", "av.", "avenida", "paseo", "plaza", "pza."]):
-        return "Dirección"
-
-    # Fallback
     return base_entity
+
 
 
 #  Validadores ligeros (Reducir FP)
@@ -970,6 +1089,80 @@ def get_extra_rules() -> List[Rule]:
             obligatorio=False
         ),
 
+
+                # =========================
+        # NUEVAS 22 ENTIDADES - EXTRA RULES
+        # =========================
+
+        # Código Postal explícito
+        Rule(
+            entity="Código Postal",
+            pattern=r"(?i)\b(?:cp|c[oó]digo\s*postal)\s*[:\-]?\s*((?:0[1-9]|[1-4]\d|5[0-2])\d{3})\b",
+            replacement="<POSTAL_CODE>",
+            obligatorio=False
+        ),
+
+        # Código Postal en dirección "..., 28013 Madrid"
+        Rule(
+            entity="Código Postal",
+            pattern=r"(?i)(?:,|\b)\s*((?:0[1-9]|[1-4]\d|5[0-2])\d{3})\s+(?=[A-ZÁÉÍÓÚÜÑ])",
+            replacement="<POSTAL_CODE>",
+            obligatorio=False
+        ),
+
+        # Ciudad a partir de CP + Ciudad
+        Rule(
+            entity="Ciudad",
+            pattern=r"(?i)\b(?:0[1-9]|[1-4]\d|5[0-2])\d{3}\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+)*)\b",
+            replacement="<CITY>",
+            obligatorio=False
+        ),
+
+        # País explícito
+        Rule(
+            entity="País",
+            pattern=r"(?i)\bpa[ií]s\s*[:\-]?\s*(España|Portugal|Francia|Italia|Alemania|Marruecos|Reino Unido|Andorra)\b",
+            replacement="<COUNTRY>",
+            obligatorio=False
+        ),
+
+        # Servicio/Unidad (Servicio de X / Unidad de X)
+        Rule(
+            entity="Servicio/Unidad",
+            pattern=r"(?i)\b(?:servicio|unidad)\s+de\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+)*)",
+            replacement="<SERVICE_UNIT>",
+            obligatorio=False
+        ),
+        Rule(
+            entity="Servicio/Unidad",
+            pattern=r"\b(UCI|URPA|REA|UCC|Unidad\s+Coronaria)\b",
+            replacement="<SERVICE_UNIT>",
+            obligatorio=False
+        ),
+
+        # Sexo explícito y por patrón "mujer/varón de 52 años"
+        Rule(
+            entity="Sexo",
+            pattern=r"(?i)\bsexo\s*[:\-]?\s*(var[oó]n|hombre|mujer)\b",
+            replacement="<SEX>",
+            obligatorio=False
+        ),
+        Rule(
+            entity="Sexo",
+            pattern=r"(?i)\b(var[oó]n|hombre|mujer)\b(?=\s+de\s+\d{1,3}\s*a[nñ]os)",
+            replacement="<SEX>",
+            obligatorio=False
+        ),
+
+        # Organización empleadora (solo con gatillo de contexto)
+        Rule(
+            entity="Organización empleadora",
+            pattern=r"(?i)\b(?:empresa|empleador|organizaci[oó]n|organización|trabaja\s+en)\s*[:\-]?\s*([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ&\-\s]{2,60})\b",
+            replacement="<EMPLOYER_ORG>",
+            obligatorio=False
+        ),
+
+
     ]
 
 
@@ -1044,6 +1237,36 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
 
         span_raw = texto[start:end]
 
+         
+
+        # Validadores finos anti-FP para nuevas entidades
+        if ent_canon == "CODIGO_POSTAL":
+            left = max(0, start - 40)
+            right = min(len(texto), end + 40)
+            if not is_valid_codigo_postal(span_raw, texto[left:right]):
+                continue
+
+        if ent_canon == "CIUDAD":
+            if not is_plausible_city(span_raw):
+                continue
+                
+        if ent_canon == "PAIS":
+            if not is_plausible_country(span_raw):
+                continue
+
+        if ent_canon == "SERVICIO_UNIDAD":
+            if not is_plausible_service_unit(span_raw):
+                continue
+
+        if ent_canon == "SEXO":
+            if not is_plausible_sex(span_raw):
+                continue
+
+        if ent_canon == "ORGANIZACION_EMPLEADORA":
+            if not is_plausible_employer_org(span_raw):
+                continue
+
+
         # Edad: exige "años/a."
         if ent_canon == "EDAD" and not re.search(r"(?:años?|a\.?)\b", span_raw.lower()):
             continue
@@ -1083,6 +1306,30 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
             continue
 
         span_text = texto[ns:ne]
+
+        # Refina DIRECCION -> CODIGO_POSTAL/CIUDAD/PAIS (alineado)
+        if ent_canon == "DIRECCION":
+            ent_canon = refine_address_entity(texto, ns, ne, base_entity="DIRECCION")
+
+        # Validadores finos anti-FP
+        if ent_canon == "CODIGO_POSTAL":
+            left = max(0, ns - 40)
+            right = min(len(texto), ne + 40)
+            if not is_valid_codigo_postal(span_text, texto[left:right]):
+                continue
+
+        if ent_canon == "CIUDAD" and not is_plausible_city(span_text):
+            continue
+        if ent_canon == "PAIS" and not is_plausible_country(span_text):
+            continue
+        if ent_canon == "SERVICIO_UNIDAD" and not is_plausible_service_unit(span_text):
+            continue
+        if ent_canon == "SEXO" and not is_plausible_sex(span_text):
+            continue
+        if ent_canon == "ORGANIZACION_EMPLEADORA" and not is_plausible_employer_org(span_text):
+            continue
+
+        
 
         preds.append(
             Prediction(
@@ -1257,6 +1504,13 @@ ENTITY_PRIORITY = {
     "FECHA": 50,
     "HOSPITAL": 40,
     "DIRECCION": 30,
+    "CODIGO_POSTAL": 25,
+    "CIUDAD": 24,
+    "PAIS": 23,
+    "SERVICIO_UNIDAD": 35,
+    "SEXO": 20,
+    "ORGANIZACION_EMPLEADORA": 20,
+
 }
 
 
@@ -1286,6 +1540,63 @@ def resolve_overlaps_global(preds: List[Prediction]) -> List[Prediction]:
 
 
 
+def add_context_entities(id_texto: int, texto: str, existing: List[Prediction]) -> List[Prediction]:
+    """
+    Extrae entidades por contexto que el NER MEDDOCAN suele NO etiquetar:
+      - SEXO
+      - SERVICIO_UNIDAD
+    Añade solo si no hay ya una entidad equivalente solapada.
+    """
+    out = list(existing)
+
+    def already_has(ent: str, s: int, e: int) -> bool:
+        for p in out:
+            if p.id_texto != id_texto:
+                continue
+            if p.entity != ent:
+                continue
+            if spans_overlap(p.start, p.end, s, e):
+                return True
+        return False
+
+    # -------- SEXO --------
+    # "Sexo: Mujer"
+    for m in re.finditer(r"(?i)\bsexo\s*[:\-]?\s*(var[oó]n|hombre|mujer)\b", texto):
+        s, e = m.start(1), m.end(1)
+        if not already_has("SEXO", s, e):
+            span = texto[s:e]
+            if is_plausible_sex(span):
+                out.append(Prediction(id_texto=id_texto, start=s, end=e, entity="SEXO", text=span, score=1.0))
+
+    # "mujer/varón de 52 años"
+    for m in re.finditer(r"(?i)\b(var[oó]n|hombre|mujer)\b(?=\s+de\s+\d{1,3}\s*a[nñ]os)", texto):
+        s, e = m.start(1), m.end(1)
+        if not already_has("SEXO", s, e):
+            span = texto[s:e]
+            if is_plausible_sex(span):
+                out.append(Prediction(id_texto=id_texto, start=s, end=e, entity="SEXO", text=span, score=1.0))
+
+    # -------- SERVICIO/UNIDAD --------
+    # "Servicio de Cardiología" / "Unidad de Oncología"
+    for m in re.finditer(r"(?i)\b(?:servicio|unidad)\s+de\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+)*)", texto):
+        s, e = m.start(0), m.end(0)  # incluye "Servicio de ..."
+        if not already_has("SERVICIO_UNIDAD", s, e):
+            span = texto[s:e]
+            if is_plausible_service_unit(span):
+                out.append(Prediction(id_texto=id_texto, start=s, end=e, entity="SERVICIO_UNIDAD", text=span, score=1.0))
+
+    # Acrónimos frecuentes
+    for m in re.finditer(r"\b(UCI|URPA|REA|UCC|Unidad\s+Coronaria)\b", texto):
+        s, e = m.start(1), m.end(1)
+        if not already_has("SERVICIO_UNIDAD", s, e):
+            span = texto[s:e]
+            if is_plausible_service_unit(span):
+                out.append(Prediction(id_texto=id_texto, start=s, end=e, entity="SERVICIO_UNIDAD", text=span, score=1.0))
+
+    return out
+
+
+
 def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline, merge_address: bool = True) -> List[Prediction]:
     """
     Ejecuta detección híbrida (NER + regex) para todos los textos.
@@ -1305,6 +1616,9 @@ def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline, m
 
         preds_combined = merge_predictions(preds_ner, preds_regex)
         preds_combined = resolve_overlaps_global(preds_combined)
+        preds_combined = add_context_entities(tid, ttext, preds_combined)
+        preds_combined = resolve_overlaps_global(preds_combined)
+
         if tid == 4:
             print("\n[DEBUG ID=4] preds_ner:")
             for p in preds_ner:
@@ -1321,6 +1635,7 @@ def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline, m
         # Si tienes merge_nearby_same_entity definido, úsalo
         if merge_address:
             preds_combined = merge_nearby_same_entity(preds_combined, ttext, entity="DIRECCION", max_gap=3)
+
 
         if tid == 4 and merge_address:
             print("\n[DEBUG ID=4] preds_final (post-merge-address):")
@@ -1355,6 +1670,13 @@ HIPAA_PLACEHOLDERS = {
     "IP": "<IP_ADDRESS>",
     "DEVICE_ID": "<DEVICE_ID>",
     "PASAPORTE": "<PASSPORT>",
+    "CODIGO_POSTAL": "<POSTAL_CODE>",
+    "CIUDAD": "<CITY>",
+    "PAIS": "<COUNTRY>",
+    "SERVICIO_UNIDAD": "<SERVICE_UNIT>",
+    "SEXO": "<SEX>",
+    "ORGANIZACION_EMPLEADORA": "<EMPLOYER_ORG>",
+
 
 
 }
