@@ -12,7 +12,6 @@ def load_all(path: str, file_mtime: float):
     df_qa = pd.read_excel(path, sheet_name="QA_Notas")
     df_miss = pd.read_excel(path, sheet_name="QA_Escapes_Detalle")
     df_ent = pd.read_excel(path, sheet_name="QA_Entidades_Fallan")
-    df_metrics = pd.read_excel(path, sheet_name="Metricas")
 
     df_anon["ID"] = df_anon["ID"].astype(int)
     df_qa["ID"] = df_qa["ID"].astype(int)
@@ -20,7 +19,7 @@ def load_all(path: str, file_mtime: float):
     if not df_miss.empty:
         df_miss["ID"] = df_miss["ID"].astype(int)
 
-    return df_anon, df_qa, df_miss, df_ent, df_metrics
+    return df_anon, df_qa, df_miss, df_ent
 
 
 
@@ -68,7 +67,7 @@ if st.button("🔄 Recargar (limpiar caché)"):
 
 
 mtime = os.path.getmtime(XLSX_PATH) if os.path.exists(XLSX_PATH) else 0.0
-df_anon, df_qa, df_miss, df_ent, df_metrics = load_all(XLSX_PATH, mtime)
+df_anon, df_qa, df_miss, df_ent = load_all(XLSX_PATH, mtime)
 
 # --- resumen arriba ---
 c1, c2, c3 = st.columns(3)
@@ -85,19 +84,46 @@ with c3:
 
 st.divider()
 
-tab1, tab2, tab3, tab4 = st.tabs(["📌 Métricas", "✅ Notas OK", "❌ Notas con fallos", "📊 Gráficas"])
+tab_ok, tab_fail, tab_graf = st.tabs(["✅ Notas OK", "❌ Notas con fallos", "📊 Gráficas"])
 
-with tab1:
-    st.subheader("Métricas (STRICT y LENIENT vs Gold_Silver_Regex)")
-    st.dataframe(df_metrics, use_container_width=True)
 
-with tab2:
+with tab_ok:
     st.subheader("Notas 100% anonimizadas (OK)")
-    ok_ids = df_qa[df_qa["Status"] == "OK"]["ID"].tolist()
-    st.write(f"Total OK: {len(ok_ids)}")
-    st.dataframe(df_qa[df_qa["Status"] == "OK"], use_container_width=True, hide_index=True)
 
-with tab3:
+    ok_df = df_qa[df_qa["Status"] == "OK"].sort_values("ID")
+    ok_ids = ok_df["ID"].tolist()
+
+    st.write(f"Total OK: {len(ok_ids)}")
+
+    if not ok_ids:
+        st.warning("No hay notas OK.")
+        st.stop()
+
+    left, right = st.columns([1, 2])
+
+    with left:
+        selected_ok = st.selectbox("Selecciona una nota OK", ok_ids, key="ok_select")
+        st.dataframe(ok_df, use_container_width=True, hide_index=True)
+
+    row = df_anon[df_anon["ID"] == selected_ok].iloc[0]
+    anon_text = str(row["Texto_anon"])
+    orig_text = str(row["Texto_original"])
+
+    with right:
+        st.subheader("🔒 Texto anonimizado")
+        st.text_area("Anonimizado", anon_text, height=320, key=f"ok_anon_{selected_ok}")
+
+
+
+        st.subheader("📄 Texto original")
+        st.text_area("Original", orig_text, height=320, key=f"ok_orig_{selected_ok}")
+
+
+
+
+
+with tab_fail:
+
     st.subheader("Notas con fallos (algo que debería anonimizarse sigue visible)")
     fail_df = df_qa[df_qa["Status"] == "FAIL"].sort_values("Misses", ascending=False)
     fail_ids = fail_df["ID"].tolist()
@@ -161,7 +187,8 @@ with tab3:
         else:
             st.write("No se han encontrado escapes (esto sería raro si está en FAIL).")
 
-with tab4:
+with tab_graf:
+
     st.subheader("Distribución OK vs FAIL")
     fig1 = pie_chart([ok, fail], ["OK", "FAIL"], "Notas OK vs FAIL")
     st.pyplot(fig1)

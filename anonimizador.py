@@ -484,6 +484,12 @@ def canonicalize_entity_name(name: str) -> str:
     return t_raw.upper()
 
 
+TIME_REGEX = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")  # 01:42 o 01:42:33
+
+def looks_like_time(span: str) -> bool:
+    return bool(TIME_REGEX.fullmatch(span.strip()))
+
+
 IP_REGEX = re.compile(r"\b\d{1,3}(\.\d{1,3}){3}\b")
 
 
@@ -1311,6 +1317,11 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
             continue
 
         span_text = texto[ns:ne]
+        # ---- FIX: no tratar horas como fecha ----
+        if ent_canon in {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA"}:
+            if looks_like_time(span_text):
+                continue
+
 
         # Refina DIRECCION -> CODIGO_POSTAL/CIUDAD/PAIS (alineado)
         if ent_canon == "DIRECCION":
@@ -1438,6 +1449,11 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
                 continue
 
             span_text = texto[ns:ne]
+            # ---- FIX: no tratar horas como fecha ----
+            if ent_canon in {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA"}:
+                if looks_like_time(span_text):
+                    continue
+
 
             # Validadores
             if ent_canon == "TELEFONO" and not is_valid_phone(span_text):
