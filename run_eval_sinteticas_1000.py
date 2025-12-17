@@ -1,5 +1,7 @@
 import os
+import re
 import pandas as pd
+
 
 from anonimizador import (
     # config / loaders
@@ -76,6 +78,30 @@ def build_gold_silver_from_regex(df_textos: pd.DataFrame, rules) -> pd.DataFrame
 
 
 # =========================
+# QA whitelist: constantes clínicas (NO PHI)
+# =========================
+CLINICAL_WHITELIST_PATTERNS = [
+    r"\bTA\s*\d{2,3}\s*/\s*\d{2,3}\b",     # TA 136/62
+    r"\bFC\s*\d{2,3}\b",                   # FC 107
+    r"\b\d{2,3}\s*lpm\b",                  # 107 lpm
+    r"\b\d{2,3}\s*mmhg\b",                 # 136 mmHg
+    r"\bSatO2\s*\d{2,3}\s*%?\b",           # SatO2 98 / 98%
+    r"\bgluc(?:emia)?\s*\d{2,3}\b",        # glucemia 110
+    r"\b\d+\s*horas?\b",                   # 7 horas
+    r"\b\d+\s*min(?:utos)?\b",             # 30 min / minutos
+]
+
+_CLINICAL_RE = re.compile("|".join(f"(?:{p})" for p in CLINICAL_WHITELIST_PATTERNS), re.IGNORECASE)
+
+def is_clinical_constant(span_txt: str) -> bool:
+    s = str(span_txt).strip()
+    if not s:
+        return False
+    # si contiene o coincide con patrón clínico -> no lo consideramos "escape"
+    return bool(_CLINICAL_RE.fullmatch(s) or _CLINICAL_RE.search(s))
+
+
+# =========================
 # QA: comprobar escapes
 # =========================
 def compute_qa_misses(df_anon: pd.DataFrame, df_gold_silver: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -83,10 +109,38 @@ def compute_qa_misses(df_anon: pd.DataFrame, df_gold_silver: pd.DataFrame) -> tu
     Para cada nota:
       - FAIL si algún Texto (span gold_silver) sigue apareciendo literal en Texto_anon
       - OK si ninguno aparece
-    Devuelve:
-      - df_qa_notas: por nota (OK/FAIL + contadores)
-      - df_qa_misses: detalle de cada span escapado (por entidad)
+
+    FIXES:
+      - Ignora spans “basura” demasiado cortos (p.ej. '24', '1') que generan falsos FAIL.
+      - Ignora patrones clínicos típicos (TA/FC/mmHg/lpm/hora) si llegan como span.
     """
+
+    # ---- helpers anti falsos-positivos ----
+    def should_ignore_span(span_txt: str) -> bool:
+        s = (span_txt or "").strip()
+        if not s:
+            return True
+
+        # 1) demasiados cortos -> casi siempre falsos FAIL (24, 1, 20, etc.)
+        if len(s) <= 2 and s.isdigit():
+            return True
+
+        # 2) números muy cortos (3 dígitos) también suelen ser constantes/vitales si están aislados
+        # (si quieres ser más estricto, quita esta línea)
+        if len(s) == 3 and s.isdigit():
+            return True
+
+        # 3) whitelist clínica (por si algún regex te mete aquí cosas que NO son PHI)
+        # ejemplos: TA 136/62, FC 107, mmHg, lpm, 09:00, 8:43, etc.
+        if re.fullmatch(r"\d{1,2}:\d{2}", s):  # hora
+            return True
+        if re.fullmatch(r"\d{2,3}/\d{2,3}", s):  # TA 136/62
+            return True
+        if s.lower() in {"mmhg", "lpm"}:
+            return True
+
+        return False
+
     # index gold por ID
     gold_by_id = {}
     for _, g in df_gold_silver.iterrows():
@@ -97,23 +151,24 @@ def compute_qa_misses(df_anon: pd.DataFrame, df_gold_silver: pd.DataFrame) -> tu
 
     for _, row in df_anon.iterrows():
         tid = int(row["ID"])
-        orig = str(row["Texto_original"])
         anon = str(row["Texto_anon"])
 
         gold_spans = gold_by_id.get(tid, [])
         total_should = len(gold_spans)
 
         misses = 0
-        miss_by_entity = {}
 
         for g in gold_spans:
             ent = str(g["Entidad"])
             span_txt = str(g["Texto"])
 
-            # criterio simple y robusto: si el texto exacto sigue en el anon -> escape
+            # ✅ nuevo: ignora spans basura antes de marcar FAIL
+            if should_ignore_span(span_txt):
+                continue
+
+            # criterio: si el texto exacto sigue en el anon -> escape
             if span_txt and (span_txt in anon):
                 misses += 1
-                miss_by_entity[ent] = miss_by_entity.get(ent, 0) + 1
                 miss_rows.append(
                     {
                         "ID": tid,
@@ -139,6 +194,7 @@ def compute_qa_misses(df_anon: pd.DataFrame, df_gold_silver: pd.DataFrame) -> tu
         df_qa_misses = pd.DataFrame(columns=["ID", "Entidad", "Texto_que_deberia_anonimizarse"])
 
     return df_qa_notas, df_qa_misses
+
 
 
 def build_entity_fail_breakdown(df_qa_misses: pd.DataFrame) -> pd.DataFrame:

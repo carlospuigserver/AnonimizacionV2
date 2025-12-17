@@ -1302,6 +1302,11 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         # Normaliza bordes
         ns, ne = normalize_span(texto, start, end, ent_canon)
         ns, ne = expand_span_left_titles(texto, ns, ne, ent_canon)
+        if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
+            ns, ne = trim_person_name_span(texto, ns, ne)
+            if ne <= ns:
+                continue
+
         if ne <= ns:
             continue
 
@@ -1384,37 +1389,51 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
 def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[Prediction]:
     preds: List[Prediction] = []
 
+    DATE_CANON = {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA"}
+
     for rule in rules:
         pattern = re.compile(rule.pattern, flags=re.IGNORECASE)
 
         for m in pattern.finditer(texto):
-            # Si el regex tiene grupos, usa el PRIMERO que realmente haya matcheado (no siempre es el 1)
-            if m.lastindex and m.lastindex >= 1:
-                gidx = None
-                for gi in range(1, m.lastindex + 1):
-                    if m.group(gi) is not None:
-                        gidx = gi
-                        break
-                if gidx is not None:
-                    start, end = m.start(gidx), m.end(gidx)
+            ent_canon = canonicalize_entity_name(rule.entity)
+
+            # ✅ FIX FECHAS: para fechas, SIEMPRE usa el match completo (group(0)),
+            # aunque el regex tenga grupos internos.
+            if ent_canon in DATE_CANON:
+                start, end = m.start(), m.end()
+            else:
+                # Si el regex tiene grupos, usa el PRIMERO que realmente haya matcheado (no siempre es el 1)
+                if m.lastindex and m.lastindex >= 1:
+                    gidx = None
+                    for gi in range(1, m.lastindex + 1):
+                        if m.group(gi) is not None:
+                            gidx = gi
+                            break
+                    if gidx is not None:
+                        start, end = m.start(gidx), m.end(gidx)
+                    else:
+                        start, end = m.start(), m.end()
                 else:
                     start, end = m.start(), m.end()
-            else:
-                start, end = m.start(), m.end()
 
-
-            ent_canon = canonicalize_entity_name(rule.entity)
+            # Roles por contexto (paciente vs profesional)
             if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
                 ent_canon = classify_person_role_by_context(texto, start, end, default=ent_canon)
 
-
-            # Reclasificar FECHA por contexto
+            # Reclasificar FECHA por contexto (solo si llega como FECHA genérica)
             if ent_canon == "FECHA":
                 ent_canon = classify_date_entity(texto, start, end)
 
-            # Normaliza bordes (quita "teléfono:", "DNI:", etc.)
+            # Normaliza bordes (quita "teléfono:", "DNI:", etc.) + expande títulos a la izquierda
             ns, ne = normalize_span(texto, start, end, ent_canon)
             ns, ne = expand_span_left_titles(texto, ns, ne, ent_canon)
+
+            # ✅ FIX NOMBRES: recorta colas tipo ", colegiado...", ", de 52 años", etc.
+            if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
+                ns, ne = trim_person_name_span(texto, ns, ne)
+                if ne <= ns:
+                    continue
+
             if ne <= ns:
                 continue
 
@@ -1427,12 +1446,12 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
                 continue
             if ent_canon == "IP" and not looks_like_ip(span_text):
                 continue
-            # ---- FIX: aceptar apellido único solo con título (Sr./Dr.) ----
+
+            # ---- Aceptar apellido único solo con título (Sr./Dr.) ----
             if ent_canon in {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}:
                 if not is_probable_person_name(span_text):
                     if not is_single_surname_with_title(texto, ns, span_text):
                         continue
-
 
             preds.append(
                 Prediction(
@@ -1446,6 +1465,7 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
             )
 
     return preds
+
 
 
 

@@ -7,7 +7,7 @@ XLSX_PATH = os.path.join("Resultados_Sinteticas_1000.xlsx")
 
 
 @st.cache_data
-def load_all(path: str):
+def load_all(path: str, file_mtime: float):
     df_anon = pd.read_excel(path, sheet_name="Textos_Anonimizados")
     df_qa = pd.read_excel(path, sheet_name="QA_Notas")
     df_miss = pd.read_excel(path, sheet_name="QA_Escapes_Detalle")
@@ -21,6 +21,7 @@ def load_all(path: str):
         df_miss["ID"] = df_miss["ID"].astype(int)
 
     return df_anon, df_qa, df_miss, df_ent, df_metrics
+
 
 
 def underline_misses_html(anon_text: str, misses: list[str]) -> str:
@@ -61,8 +62,13 @@ def pie_chart(values, labels, title):
 
 st.set_page_config(page_title="QA Anonimización (Sintéticas)", layout="wide")
 st.title("🧪 QA de anonimizador – 1000 notas sintéticas")
+if st.button("🔄 Recargar (limpiar caché)"):
+    st.cache_data.clear()
+    st.rerun()
 
-df_anon, df_qa, df_miss, df_ent, df_metrics = load_all(XLSX_PATH)
+
+mtime = os.path.getmtime(XLSX_PATH) if os.path.exists(XLSX_PATH) else 0.0
+df_anon, df_qa, df_miss, df_ent, df_metrics = load_all(XLSX_PATH, mtime)
 
 # --- resumen arriba ---
 c1, c2, c3 = st.columns(3)
