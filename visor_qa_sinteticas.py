@@ -209,18 +209,30 @@ st.markdown(
 # ---------------
 with tab_ok:
     st.subheader("Notas 100% anonimizadas (OK)")
-    ok_df = df_qa[df_qa["Status"] == "OK"].copy()
-    ok_ids = ok_df["ID"].tolist()
-    st.write(f"Total OK: {len(ok_ids)}")
+    ok_df = df_qa[df_qa["Status"] == "OK"].copy().reset_index(drop=True)
 
-    if not ok_ids:
+    if ok_df.empty:
         st.info("No hay notas OK.")
         st.stop()
+
+    # Nota 1..N para mostrar (pero conservamos el ID real)
+    ok_df.insert(0, "Nota", range(1, len(ok_df) + 1))
+
+    # mapping Nota -> ID real
+    ok_nota_to_id = dict(zip(ok_df["Nota"], ok_df["ID"]))
 
     left, right = st.columns([1, 2])
 
     with left:
-        selected_ok = st.selectbox("Selecciona una nota OK", ok_ids, key="sel_ok")
+        selected_ok_nota = st.selectbox(
+            "Selecciona una nota OK",
+            ok_df["Nota"].tolist(),
+            format_func=lambda n: f"Nota {n}",
+            key="sel_ok",
+        )
+        selected_ok = int(ok_nota_to_id[selected_ok_nota])
+
+        # tabla mostrando Nota primero (y sigues teniendo ID si quieres)
         st.dataframe(ok_df, use_container_width=True, hide_index=True, key="tbl_ok")
 
     row = df_anon[df_anon["ID"] == selected_ok].iloc[0]
@@ -228,29 +240,45 @@ with tab_ok:
     orig_text = str(row["Texto_original"])
 
     with right:
-        # ✅ ORDEN INVERTIDO: ORIGINAL ARRIBA
         st.subheader("📄 Texto original")
         st.text_area("Original", orig_text, height=260, key=f"orig_ok_{selected_ok}")
 
         st.subheader("🔒 Texto anonimizado (placeholders en verde)")
         st.markdown(underline_placeholders_html(anon_text), unsafe_allow_html=True)
 
+
 # ---------------
 # TAB FAIL
 # ---------------
 with tab_fail:
     st.subheader("Notas con fallos (algo que debería anonimizarse sigue visible)")
-    fail_df = df_qa[df_qa["Status"] == "FAIL"].sort_values("Misses", ascending=False)
-    fail_ids = fail_df["ID"].tolist()
+    fail_df = (
+        df_qa[df_qa["Status"] == "FAIL"]
+        .sort_values("Misses", ascending=False)
+        .reset_index(drop=True)
+    )
 
-    if not fail_ids:
+    if fail_df.empty:
         st.success("No hay fallos 🎉")
         st.stop()
+
+    # Nota 1..N para mostrar
+    fail_df.insert(0, "Nota", range(1, len(fail_df) + 1))
+
+    # mapping Nota -> ID real
+    fail_nota_to_id = dict(zip(fail_df["Nota"], fail_df["ID"]))
 
     left, right = st.columns([1, 2])
 
     with left:
-        selected_fail = st.selectbox("Selecciona una nota FAIL", fail_ids, key="sel_fail")
+        selected_fail_nota = st.selectbox(
+            "Selecciona una nota FAIL",
+            fail_df["Nota"].tolist(),
+            format_func=lambda n: f"Nota {n}",
+            key="sel_fail",
+        )
+        selected_fail = int(fail_nota_to_id[selected_fail_nota])
+
         st.dataframe(fail_df, use_container_width=True, hide_index=True, key="tbl_fail")
 
     row = df_anon[df_anon["ID"] == selected_fail].iloc[0]
@@ -264,20 +292,18 @@ with tab_fail:
             .astype(str)
             .tolist()
         )
+
     uniq_miss = sorted({m for m in misses_for_note if isinstance(m, str) and m.strip()}, key=len, reverse=True)
 
-    # ORIGINAL: subrayar lo que debería anonimizarse (por offsets)
     miss_spans_original = build_miss_spans_for_original(orig_text, misses_for_note)
     orig_styled = underline_spans_html(orig_text, miss_spans_original)
 
-    # ANON: primero verde placeholders, luego rojo escapes (reemplazo literal sobre HTML escapado)
     anon_styled = underline_placeholders_html(anon_text)
     for m in uniq_miss:
         m_safe = _escape_html(m)
         anon_styled = anon_styled.replace(m_safe, f"<span class='miss'>{m_safe}</span>")
 
     with right:
-        # ✅ ORDEN INVERTIDO: ORIGINAL ARRIBA
         st.subheader("📄 Texto original (rojo = debería anon)")
         st.markdown(orig_styled, unsafe_allow_html=True)
 
@@ -286,7 +312,12 @@ with tab_fail:
 
         st.subheader("📌 Escapes detectados (por regex-gold)")
         if uniq_miss:
-            st.dataframe(pd.DataFrame({"Escapes": uniq_miss}), use_container_width=True, hide_index=True, key=f"esc_{selected_fail}")
+            st.dataframe(
+                pd.DataFrame({"Escapes": uniq_miss}),
+                use_container_width=True,
+                hide_index=True,
+                key=f"esc_{selected_fail}",
+            )
         else:
             st.write("No se han encontrado escapes (raro si está en FAIL).")
 
