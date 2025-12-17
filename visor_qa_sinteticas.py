@@ -16,24 +16,19 @@ def _escape_html(s: str) -> str:
         .replace(">", "&gt;")
     )
 
+
 def underline_spans_html(text: str, spans: list[tuple[int, int, str]]) -> str:
     """
     Subraya spans (start,end) en un texto. label se usa como tooltip.
     spans: [(start, end, label), ...]
     """
-    safe = _escape_html(text)
-
-    # Para poder subrayar por offsets, necesitamos trabajar sobre el texto original,
-    # pero insertando tags de derecha a izquierda para no romper offsets.
-    # OJO: como escapamos HTML, offsets cambiarían si escapamos antes.
-    # Solución: NO escapamos primero. Insertamos tags en el texto original y luego escapamos “trozos”.
-    # Implementación: construimos output por segmentos.
     if not spans:
         return f"<div class='box'>{_escape_html(text)}</div>"
 
     spans_sorted = sorted(spans, key=lambda x: x[0])
     out_parts = []
     cursor = 0
+
     for s, e, label in spans_sorted:
         s = max(0, min(len(text), int(s)))
         e = max(0, min(len(text), int(e)))
@@ -43,58 +38,45 @@ def underline_spans_html(text: str, spans: list[tuple[int, int, str]]) -> str:
             # overlap; lo saltamos para no liarla visualmente
             continue
 
-        # texto normal
         out_parts.append(_escape_html(text[cursor:s]))
 
-        # texto marcado
         seg = _escape_html(text[s:e])
         lab = _escape_html(str(label))
         out_parts.append(f"<span class='mark' title='{lab}'>{seg}</span>")
 
         cursor = e
 
-    # resto
     out_parts.append(_escape_html(text[cursor:]))
     return "<div class='box'>" + "".join(out_parts) + "</div>"
 
-def underline_misses_html(text: str, misses: list[str], css_class: str) -> str:
-    """
-    Subraya por reemplazo literal (sin offsets) una lista de strings.
-    Útil para marcar escapes en el anonimizado.
-    """
-    safe = _escape_html(text)
-    uniq = sorted({m for m in misses if isinstance(m, str) and m.strip()}, key=len, reverse=True)
-
-    for m in uniq:
-        m_safe = _escape_html(m)
-        if m_safe in safe:
-            safe = safe.replace(m_safe, f"<span class='{css_class}'>{m_safe}</span>")
-    return f"<div class='box'>{safe}</div>"
 
 def underline_placeholders_html(anon_text: str) -> str:
     """
-    Subraya placeholders tipo <PATIENT_NAME>, <DATE>, etc. en verde.
+    Subraya en verde placeholders de dos tipos:
+      - <PLACEHOLDER> (en HTML escapado: &lt;...&gt;)
+      - Tokens estilo Phone_XXX, Mail_XXX, IP_XXX, HC-ID_XXXXX, etc.
     """
     safe = _escape_html(anon_text)
 
-    # placeholders estándar: <...>
-    # (evita comerse HTML porque ya está escapado)
-    pat = re.compile(r"&lt;[A-Z0-9_]+&gt;")
+    # 1) <PLACEHOLDER>
+    pat_angle = re.compile(r"&lt;[A-Z0-9_]+&gt;")
 
-    def repl(m):
-        return f"<span class='okanon'>{m.group(0)}</span>"
+    # 2) Phone_XXX / Mail_XXX / IP_XXX / HC-ID_XXXXX / NHC_XXXXX / ID_XXXXX / ...
+    # Regla general: “PALABRA_con_Xs” (con guion permitido antes del _)
+    pat_x = re.compile(r"\b[A-Za-z0-9\-]+_X{2,}\b")
 
-    safe2 = pat.sub(repl, safe)
-    return f"<div class='box'>{safe2}</div>"
+    safe = pat_angle.sub(lambda m: f"<span class='okanon'>{m.group(0)}</span>", safe)
+    safe = pat_x.sub(lambda m: f"<span class='okanon'>{m.group(0)}</span>", safe)
 
-# -------------------------
-# Charts
-# -------------------------
+    return f"<div class='box'>{safe}</div>"
+
+
 def pie_chart(values, labels, title):
     fig = plt.figure()
     plt.pie(values, labels=labels, autopct="%1.1f%%")
     plt.title(title)
     return fig
+
 
 # -------------------------
 # Data load (cache with mtime)
@@ -114,6 +96,7 @@ def load_all(path: str, file_mtime: float):
 
     return df_anon, df_qa, df_miss, df_ent
 
+
 # -------------------------
 # Build offsets for ORIGINAL highlighting
 # -------------------------
@@ -126,7 +109,6 @@ def build_miss_spans_for_original(orig_text: str, misses: list[str]) -> list[tup
     if not orig_text or not misses:
         return spans
 
-    # orden por longitud para encontrar primero lo largo
     uniq = sorted({m for m in misses if isinstance(m, str) and m.strip()}, key=len, reverse=True)
 
     for m in uniq:
@@ -141,7 +123,6 @@ def build_miss_spans_for_original(orig_text: str, misses: list[str]) -> list[tup
             spans.append((idx, idx + len(m), f"DEBERÍA ANON: {m}"))
             start = idx + 1
 
-    # ordenar y quitar overlaps básicos
     spans.sort(key=lambda x: x[0])
     cleaned = []
     last_end = -1
@@ -150,6 +131,7 @@ def build_miss_spans_for_original(orig_text: str, misses: list[str]) -> list[tup
             cleaned.append((s, e, lab))
             last_end = e
     return cleaned
+
 
 # -------------------------
 # UI
@@ -178,7 +160,6 @@ with c3:
 
 st.divider()
 
-# Tabs (sin métricas)
 tab_ok, tab_fail, tab_graph = st.tabs(["✅ Notas OK", "❌ Notas con fallos", "📊 Gráficas"])
 
 # CSS global
@@ -240,18 +221,19 @@ with tab_ok:
 
     with left:
         selected_ok = st.selectbox("Selecciona una nota OK", ok_ids, key="sel_ok")
-        st.dataframe(ok_df, use_container_width=True, hide_index=True)
+        st.dataframe(ok_df, use_container_width=True, hide_index=True, key="tbl_ok")
 
     row = df_anon[df_anon["ID"] == selected_ok].iloc[0]
     anon_text = str(row["Texto_anon"])
     orig_text = str(row["Texto_original"])
 
     with right:
-        st.subheader("🔒 Texto anonimizado (placeholders en verde)")
-        st.markdown(underline_placeholders_html(anon_text), unsafe_allow_html=True)
-
+        # ✅ ORDEN INVERTIDO: ORIGINAL ARRIBA
         st.subheader("📄 Texto original")
         st.text_area("Original", orig_text, height=260, key=f"orig_ok_{selected_ok}")
+
+        st.subheader("🔒 Texto anonimizado (placeholders en verde)")
+        st.markdown(underline_placeholders_html(anon_text), unsafe_allow_html=True)
 
 # ---------------
 # TAB FAIL
@@ -269,13 +251,12 @@ with tab_fail:
 
     with left:
         selected_fail = st.selectbox("Selecciona una nota FAIL", fail_ids, key="sel_fail")
-        st.dataframe(fail_df, use_container_width=True, hide_index=True)
+        st.dataframe(fail_df, use_container_width=True, hide_index=True, key="tbl_fail")
 
     row = df_anon[df_anon["ID"] == selected_fail].iloc[0]
     anon_text = str(row["Texto_anon"])
     orig_text = str(row["Texto_original"])
 
-    # misses del excel
     misses_for_note = []
     if not df_miss.empty:
         misses_for_note = (
@@ -283,37 +264,29 @@ with tab_fail:
             .astype(str)
             .tolist()
         )
+    uniq_miss = sorted({m for m in misses_for_note if isinstance(m, str) and m.strip()}, key=len, reverse=True)
 
     # ORIGINAL: subrayar lo que debería anonimizarse (por offsets)
     miss_spans_original = build_miss_spans_for_original(orig_text, misses_for_note)
     orig_styled = underline_spans_html(orig_text, miss_spans_original)
 
-    # ANON: subrayar placeholders (verde) + escapes literales (rojo)
-    # (primero ponemos placeholders, luego marcamos misses)
-    anon_with_placeholders = _escape_html(anon_text)
-    anon_with_placeholders = re.sub(
-        r"&lt;[A-Z0-9_]+&gt;",
-        lambda m: f"<span class='okanon'>{m.group(0)}</span>",
-        anon_with_placeholders
-    )
-    anon_with_both = anon_with_placeholders
-    uniq_miss = sorted({m for m in misses_for_note if isinstance(m, str) and m.strip()}, key=len, reverse=True)
+    # ANON: primero verde placeholders, luego rojo escapes (reemplazo literal sobre HTML escapado)
+    anon_styled = underline_placeholders_html(anon_text)
     for m in uniq_miss:
         m_safe = _escape_html(m)
-        if m_safe in anon_with_both:
-            anon_with_both = anon_with_both.replace(m_safe, f"<span class='miss'>{m_safe}</span>")
-    anon_styled = f"<div class='box'>{anon_with_both}</div>"
+        anon_styled = anon_styled.replace(m_safe, f"<span class='miss'>{m_safe}</span>")
 
     with right:
-        st.subheader("🔒 Texto anonimizado (verde = anon, rojo = ESCAPE)")
-        st.markdown(anon_styled, unsafe_allow_html=True)
-
+        # ✅ ORDEN INVERTIDO: ORIGINAL ARRIBA
         st.subheader("📄 Texto original (rojo = debería anon)")
         st.markdown(orig_styled, unsafe_allow_html=True)
 
+        st.subheader("🔒 Texto anonimizado (verde = anon, rojo = ESCAPE)")
+        st.markdown(anon_styled, unsafe_allow_html=True)
+
         st.subheader("📌 Escapes detectados (por regex-gold)")
         if uniq_miss:
-            st.write(pd.DataFrame({"Escapes": uniq_miss}))
+            st.dataframe(pd.DataFrame({"Escapes": uniq_miss}), use_container_width=True, hide_index=True, key=f"esc_{selected_fail}")
         else:
             st.write("No se han encontrado escapes (raro si está en FAIL).")
 

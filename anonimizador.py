@@ -1400,7 +1400,9 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
 def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[Prediction]:
     preds: List[Prediction] = []
 
-    DATE_CANON = {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA"}
+    DATE_CANON = {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA", "DATE", "DATE_BIRTH", "DATE_ADMISSION"}
+
+
 
     for rule in rules:
         pattern = re.compile(rule.pattern, flags=re.IGNORECASE)
@@ -1434,6 +1436,20 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
             # Reclasificar FECHA por contexto (solo si llega como FECHA genérica)
             if ent_canon == "FECHA":
                 ent_canon = classify_date_entity(texto, start, end)
+
+            # ✅ Evitar confundir horas tipo 22:42 o 01:42 con fechas
+            if ent_canon in DATE_CANON:
+                matched = texto[start:end]
+
+                # Caso 1: el match es 1-2 dígitos y justo después viene ":" -> es hora, no fecha
+                if matched.isdigit() and len(matched) <= 2:
+                    if end < len(texto) and texto[end] == ":":
+                        continue
+
+                # Caso 2: dentro del match hay ":" directamente -> hora
+                if ":" in matched:
+                    continue
+
 
             # Normaliza bordes (quita "teléfono:", "DNI:", etc.) + expande títulos a la izquierda
             ns, ne = normalize_span(texto, start, end, ent_canon)
