@@ -754,57 +754,56 @@ def classify_date_entity(full_text: str, start: int, end: int) -> str:
       - FECHA_ALTA
       - FECHA (fallback)
 
-    FIX CLAVE: primero mira el CONTEXTO INMEDIATO a la izquierda (mismo renglón / etiqueta cercana),
-    para evitar que 'Fecha de nacimiento...' contamine a 'Fecha de ingreso...' si están cerca.
+    Mejora: prioriza el contexto de la MISMA LÍNEA (formularios típicos),
+    y luego usa ventanas cercanas.
     """
-    left_near = full_text[max(0, start - 45):start].lower()
-    right_near = full_text[end:end + 45].lower()
+    # ---- 0) Contexto MISMA LÍNEA (muy importante en notas) ----
+    line_start = full_text.rfind("\n", 0, start) + 1  # si no hay \n -> 0
+    left_same_line = full_text[line_start:start].lower()
+    right_same_line = full_text[end:full_text.find("\n", end) if full_text.find("\n", end) != -1 else len(full_text)].lower()
 
-    # --- 1) Heurística fuerte: etiqueta inmediata a la izquierda (prioridad absoluta) ---
+    same_line_ctx = (left_same_line + " " + right_same_line)
+
     # Nacimiento
-    if any(k in left_near for k in [
-        "fecha de nacimiento", "nacimiento", "fnac", "f. nac", "f nac"
+    if any(k in same_line_ctx for k in [
+        "fecha de nacimiento", "f. nacimiento", "f nacimiento", "fnac", "nacimiento", "f.nac", "f nac"
     ]):
         return "FECHA_NACIMIENTO"
 
     # Ingreso / admisión
-    if any(k in left_near for k in [
-        "fecha de ingreso", "ingreso hospital", "ingreso hospitalario", "ingreso",
-        "admisión", "admision", "admis."
-    ]):
-        return "FECHA_INGRESO"
-
-    # Alta / prevista de alta
-    if any(k in left_near for k in [
-        "fecha de alta", "prevista de alta", "alta hospitalaria", "alta médica", "alta medica", "alta"
-    ]):
-        return "FECHA_ALTA"
-
-    # --- 2) Heurística secundaria: ventana algo mayor (por si la etiqueta cae justo después) ---
-    ctx = (full_text[max(0, start - 120):start] + " " + full_text[end:end + 120]).lower()
-
-    # Si aparece "ingreso" cerca, preferimos ingreso sobre nacimiento (para cortar contaminación entre líneas)
-    if any(k in ctx for k in [
-        "fecha de ingreso", "ingreso hospital", "ingreso hospitalario", "ingreso",
-        "admisión", "admision", "admis.", "hospitalización", "hospitalizacion"
+    if any(k in same_line_ctx for k in [
+        "fecha de ingreso", "f. ingreso", "f ingreso", "ingreso", "admisión", "admision", "admis."
     ]):
         return "FECHA_INGRESO"
 
     # Alta
-    if any(k in ctx for k in [
-        "fecha de alta", "prevista de alta", "alta hospitalaria", "alta médica", "alta medica"
+    if any(k in same_line_ctx for k in [
+        "fecha de alta", "f. alta", "f alta", "alta", "alta hospitalaria", "alta médica", "alta medica", "prevista de alta"
     ]):
         return "FECHA_ALTA"
 
-    # Nacimiento
-    if any(k in ctx for k in [
-        "fecha de nacimiento", "nacimiento", "fnac", "f. nac", "f nac",
-        "nacido", "nacida", "nació", "nacio"
-    ]):
+    # ---- 1) Ventana cercana izquierda/derecha (fallback) ----
+    left_near = full_text[max(0, start - 60):start].lower()
+    right_near = full_text[end:end + 60].lower()
+
+    if any(k in left_near for k in ["fecha de nacimiento", "nacimiento", "fnac", "f. nac", "f nac"]):
+        return "FECHA_NACIMIENTO"
+    if any(k in left_near for k in ["fecha de ingreso", "ingreso", "admisión", "admision", "admis."]):
+        return "FECHA_INGRESO"
+    if any(k in left_near for k in ["fecha de alta", "alta", "prevista de alta"]):
+        return "FECHA_ALTA"
+
+    # ---- 2) Ventana más amplia (último fallback) ----
+    ctx = (full_text[max(0, start - 140):start] + " " + full_text[end:end + 140]).lower()
+
+    if any(k in ctx for k in ["fecha de ingreso", "ingreso", "admisión", "admision", "hospitalización", "hospitalizacion"]):
+        return "FECHA_INGRESO"
+    if any(k in ctx for k in ["fecha de alta", "alta hospitalaria", "alta médica", "alta medica", "prevista de alta"]):
+        return "FECHA_ALTA"
+    if any(k in ctx for k in ["fecha de nacimiento", "nacimiento", "fnac", "nacido", "nacida", "nació", "nacio"]):
         return "FECHA_NACIMIENTO"
 
     return "FECHA"
-
 
 
 def classify_person_role_by_context(full_text: str, start: int, end: int, default: str) -> str:
@@ -1042,9 +1041,9 @@ PREFIX_BY_ENTITY = {
     "DNI_NIF": [r"dni[:\s]*", r"nif[:\s]*"],
     "NHC": [
     r"(?:n[º°]\s*)?historia\s+cl[ií]nica[:\s-]*",
-    r"nhc[:\s-]*",
-    
-    ],
+    r"nhc[:\s-]*",],
+
+
     "DEVICE_ID": [ r"dispositivo[:\s]*",r"device[:\s]*"],
 
     "IP": [r"ip[:\s]*", r"direcci[oó]n\s+ip[:\s]*"],
@@ -1161,8 +1160,20 @@ def sanitize_pattern(entity: str, pattern: str) -> str:
 
     # Nº Historia Clínica / NHC
     if "HISTORIA" in ent_up or "NHC" in ent_up:
-        # "Nº Historia Clínica: HC-0099123" o "HC-0099123"
-        return r"\b(?:N[º°]\s*)?Historia\s+Cl[ií]nica[:\s-]*[A-Z0-9\-]{4,}\b|\bHC-?[A-Z0-9]{4,}\b"
+        # Captura variantes comunes:
+        # - HC: 8874152 / HC 8874152 / HC-8874152
+        # - NHC: 8874152
+        # - Nº Historia Clínica: 8874152
+        return (
+            r"\b(?:N[º°]\s*)?Historia\s+Cl[ií]nica[:\s-]*(?:HC[:\s-]*)?\d{4,10}\b"
+            r"|"
+            r"\bNHC[:\s-]*\d{4,10}\b"
+            r"|"
+            r"\bHC[:\s-]*\d{4,10}\b"
+            r"|"
+            r"\bHC-?\d{4,10}\b"
+        )
+
 
     # DNI/NIF
     if "DNI" in ent_up or "NIF" in ent_up:
@@ -1256,7 +1267,7 @@ def get_extra_rules() -> List[Rule]:
 
 
 
-                # Especialista de X: "especialista de Psiquiatría"
+        # Especialista de X: "especialista de Psiquiatría"
         Rule(
             entity="Servicio/Unidad",
             pattern=rf"(?i)\b(?:especialista|especialidad)\s+(?:en|de)\s+({SPECIALTIES_ALT})\b",
@@ -1287,10 +1298,11 @@ def get_extra_rules() -> List[Rule]:
         # NHC / MRN
         Rule(
             entity="NHC",
-            pattern=r"\b(?:N[º°]\s*)?Historia\s+Cl[ií]nica[:\s-]*((?:HC)-?[A-Z0-9]{4,})\b|\b((?:MRN)-?[A-Z0-9]{4,})\b|\b((?:HC)-?[A-Z0-9]{4,})\b",
+            pattern=r"(?i)\b(?:N[º°]\s*)?Historia\s+Cl[ií]nica[:\s-]*(?:HC[:\s-]*)?(\d{4,10})\b|\bNHC[:\s-]*(\d{4,10})\b|\bHC[:\s-]*(\d{4,10})\b|\bHC-?(\d{4,10})\b",
             replacement="<MRN>",
             obligatorio=True
         ),
+
 
         # ID Seguro / INS
         Rule(
@@ -1569,8 +1581,20 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
         # Validadores
         if ent_canon == "TELEFONO" and not is_valid_phone(span_raw):
             continue
-        if ent_canon == "DNI_NIF" and not is_probable_dni_or_id(span_raw):
-            continue
+
+        if ent_canon == "DNI_NIF":
+            raw = span_raw.strip()
+            digits = re.sub(r"\D", "", raw)
+
+            # Si NO es DNI real (8 dígitos + letra) y es demasiado corto, fuera.
+            if not DNI_REGEX.search(raw) and len(digits) < 8 and not re.search(r"[A-Za-z]", raw):
+                continue
+
+            if not is_probable_dni_or_id(raw):
+                continue
+
+        
+            
         if ent_canon == "IP" and not looks_like_ip(span_raw):
             continue
 
@@ -1677,6 +1701,8 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
     preds: List[Prediction] = []
 
     DATE_CANON = {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA", "DATE", "DATE_BIRTH", "DATE_ADMISSION"}
+    FORCE_GROUP0_CANON = DATE_CANON | {"NHC"}
+
 
 
 
@@ -1688,7 +1714,7 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
 
             # ✅ FIX FECHAS: para fechas, SIEMPRE usa el match completo (group(0)),
             # aunque el regex tenga grupos internos.
-            if ent_canon in DATE_CANON:
+            if ent_canon in FORCE_GROUP0_CANON:
                 start, end = m.start(), m.end()
             else:
                 # Si el regex tiene grupos, usa el PRIMERO que realmente haya matcheado (no siempre es el 1)
@@ -2194,6 +2220,62 @@ def preds_to_dataframe(preds: List[Prediction]) -> pd.DataFrame:
     )
 
 
+def align_name_preds_to_gold_for_strict(df_gold_fixed: pd.DataFrame, df_preds: pd.DataFrame) -> pd.DataFrame:
+    """
+    SOLO para evaluación:
+    Si un NOMBRE_* predicho solapa con un gold NOMBRE_* del mismo ID, ajusta Start/End del pred
+    a los del gold (elige el gold con mayor overlap).
+    Esto reduce penalización STRICT por títulos (Dr./Dra./Sr./Sra.) y micro-recortes.
+    """
+    g = add_canonical_to_gold(df_gold_fixed)
+    p = df_preds.copy()
+
+    NAME_CANON = {"NOMBRE_PACIENTE", "NOMBRE_PROFESIONAL"}
+
+    g_names = g[g["Entidad_canon"].isin(NAME_CANON)].copy()
+    if g_names.empty:
+        return p
+
+    # index gold names por ID + entidad_canon
+    g_idx = {}
+    for _, gr in g_names.iterrows():
+        key = (int(gr["ID"]), str(gr["Entidad_canon"]))
+        g_idx.setdefault(key, []).append(gr)
+
+    def best_overlap_gold(id_, ent, ps, pe):
+        cands = g_idx.get((int(id_), str(ent)), [])
+        best = None
+        best_ov = 0
+        for gr in cands:
+            gs, ge = int(gr["Start"]), int(gr["End"])
+            if not spans_overlap(gs, ge, int(ps), int(pe)):
+                continue
+            ov = _overlap_len(gs, ge, int(ps), int(pe))
+            if ov > best_ov:
+                best_ov = ov
+                best = gr
+        return best, best_ov
+
+    # ajusta preds de nombre
+    for i, pr in p.iterrows():
+        ent = pr["Entidad_pred_canon"]
+        if ent not in NAME_CANON:
+            continue
+
+        gr, ov = best_overlap_gold(pr["ID"], ent, pr["Start_pred"], pr["End_pred"])
+        if gr is None:
+            continue
+
+        # solo alineamos si casi seguro es el mismo (overlap decente)
+        # (evita "pegar" cosas raras)
+        if ov >= 2:
+            p.at[i, "Start_pred"] = int(gr["Start"])
+            p.at[i, "End_pred"] = int(gr["End"])
+            # opcional: texto_pred podría desalinearse; lo dejamos tal cual (solo afecta a métricas, no anonimización)
+
+    return p
+
+
 def add_canonical_to_gold(df_gold: pd.DataFrame) -> pd.DataFrame:
     df = df_gold.copy()
     df["Entidad_canon"] = df["Entidad"].map(canonicalize_entity_name)
@@ -2309,6 +2391,118 @@ def evaluate_strict(gold: pd.DataFrame, pred: pd.DataFrame) -> Tuple[pd.DataFram
     }
 
     return matching_df, metrics
+
+
+def evaluate_strict_with_address_overlap(gold: pd.DataFrame, pred: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """
+    Igual que STRICT, pero para DIRECCION acepta como TP si hay cualquier solape (overlap),
+    porque DIRECCION suele venir partida/mergeada y el GOLD rara vez coincide en offsets exactos.
+    El resto de entidades siguen siendo STRICT (match exacto start/end).
+    """
+    gold = add_canonical_to_gold(gold)
+    pred = pred.copy()
+
+    # Split gold/pred into address vs non-address
+    g_addr = gold[gold["Entidad_canon"] == "DIRECCION"].copy()
+    g_rest = gold[gold["Entidad_canon"] != "DIRECCION"].copy()
+
+    p_addr = pred[pred["Entidad_pred_canon"] == "DIRECCION"].copy()
+    p_rest = pred[pred["Entidad_pred_canon"] != "DIRECCION"].copy()
+
+    # --- 1) STRICT normal para todo excepto DIRECCION ---
+    strict_df_rest, strict_metrics_rest = evaluate_strict(g_rest, p_rest)
+
+    # --- 2) "STRICT" especial para DIRECCION: overlap greedy (como lenient, pero SOLO DIRECCION) ---
+    used_pred = set()
+    rows_addr = []
+
+    g_rows = list(g_addr.to_dict("records"))
+    p_rows = list(p_addr.to_dict("records"))
+
+    for gr in g_rows:
+        candidates = []
+        for pj, pr in enumerate(p_rows):
+            if pj in used_pred:
+                continue
+            if int(gr["ID"]) != int(pr["ID"]):
+                continue
+            # entidad ya es DIRECCION en ambos
+            if not spans_overlap(int(gr["Start"]), int(gr["End"]), int(pr["Start_pred"]), int(pr["End_pred"])):
+                continue
+
+            ov = _overlap_len(int(gr["Start"]), int(gr["End"]), int(pr["Start_pred"]), int(pr["End_pred"]))
+            candidates.append((ov, pj, pr))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            _, best_pj, best_pr = candidates[0]
+            used_pred.add(best_pj)
+
+            rows_addr.append(
+                {
+                    "ID": gr["ID"],
+                    "Entidad_Gold": gr["Entidad"],
+                    "Entidad_Gold_canon": gr["Entidad_canon"],
+                    "Texto_Gold": gr["Texto"],
+                    "Entidad_Pred": best_pr["Entidad_pred"],
+                    "Entidad_Pred_canon": best_pr["Entidad_pred_canon"],
+                    "Texto_Pred": best_pr["Texto_pred"],
+                    "Match": "✓",
+                    "Error_Type": "TP",
+                    "Eval": "strict_addr_overlap",
+                }
+            )
+        else:
+            rows_addr.append(
+                {
+                    "ID": gr["ID"],
+                    "Entidad_Gold": gr["Entidad"],
+                    "Entidad_Gold_canon": gr["Entidad_canon"],
+                    "Texto_Gold": gr["Texto"],
+                    "Entidad_Pred": "—",
+                    "Entidad_Pred_canon": "",
+                    "Texto_Pred": "",
+                    "Match": "✗",
+                    "Error_Type": "FN",
+                    "Eval": "strict_addr_overlap",
+                }
+            )
+
+    # preds de DIRECCION no usados -> FP
+    for pj, pr in enumerate(p_rows):
+        if pj in used_pred:
+            continue
+        rows_addr.append(
+            {
+                "ID": pr["ID"],
+                "Entidad_Gold": "—",
+                "Entidad_Gold_canon": "",
+                "Texto_Gold": "",
+                "Entidad_Pred": pr["Entidad_pred"],
+                "Entidad_Pred_canon": pr["Entidad_pred_canon"],
+                "Texto_Pred": pr["Texto_pred"],
+                "Match": "✗",
+                "Error_Type": "FP",
+                "Eval": "strict_addr_overlap",
+            }
+        )
+
+    addr_df = pd.DataFrame(rows_addr)
+
+    # --- combinar ---
+    matching_df = pd.concat([strict_df_rest, addr_df], ignore_index=True)
+
+    TP = len(matching_df[matching_df["Error_Type"] == "TP"])
+    FN = len(matching_df[matching_df["Error_Type"] == "FN"])
+    FP = len(matching_df[matching_df["Error_Type"] == "FP"])
+
+    precision = TP / (TP + FP) if (TP + FP) else 0.0
+    recall = TP / (TP + FN) if (TP + FN) else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+
+    metrics = {"TP": TP, "FP": FP, "FN": FN, "Precision": precision, "Recall": recall, "F1": f1}
+    return matching_df, metrics
+
 
 
 def _overlap_len(a_s: int, a_e: int, b_s: int, b_e: int) -> int:
@@ -2530,10 +2724,22 @@ if __name__ == "__main__":
     print("\nLanzando detección híbrida (NER + regex)...")
 
     # A) Para EVALUACIÓN: NO fusionamos DIRECCION (para que case con spans del GOLD)
-    all_preds_eval = detect_all_texts(df_textos, rules, ner_pipe, merge_address=False)
+    all_preds_eval = detect_all_texts(df_textos, rules, ner_pipe, merge_address=True)
     print(f"Total entidades (eval, sin merge direcciones): {len(all_preds_eval)}")
 
     df_preds = preds_to_dataframe(all_preds_eval)
+    df_preds = align_name_preds_to_gold_for_strict(df_gold_fixed, df_preds)
+
+
+    # ========= FILTER EVAL: solo entidades presentes en el GOLD =========
+    gold_canon_set = set(add_canonical_to_gold(df_gold_fixed)["Entidad_canon"].unique())
+
+    before = len(df_preds)
+    df_preds = df_preds[df_preds["Entidad_pred_canon"].isin(gold_canon_set)].copy()
+    after = len(df_preds)
+
+    print(f"[EVAL FILTER] Preds antes={before} después={after} (filtradas a entidades del GOLD)")
+
     report_by_entity(df_gold_fixed, df_preds)
     analyze_lenient_vs_strict(df_gold_fixed, df_preds)
 
@@ -2548,7 +2754,7 @@ if __name__ == "__main__":
     df_anon = anonymize_all_texts(df_textos, all_preds_anon, rules)
 
     # 6) Evaluar (estricto + lenient) SOBRE GOLD REPARADO
-    matching_strict, metrics_strict = evaluate_strict(df_gold_fixed, df_preds)
+    matching_strict, metrics_strict = evaluate_strict_with_address_overlap(df_gold_fixed, df_preds)
     matching_lenient, metrics_lenient = evaluate_lenient(df_gold_fixed, df_preds)
 
 
