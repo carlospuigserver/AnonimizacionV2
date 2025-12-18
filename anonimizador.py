@@ -489,6 +489,51 @@ TIME_REGEX = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")  # 01:42 o 01:42:33
 def looks_like_time(span: str) -> bool:
     return bool(TIME_REGEX.fullmatch(span.strip()))
 
+# =========================
+# FECHA vs HORA (bloqueo fuerte)
+# =========================
+
+# Fecha "real" (solo aceptamos como FECHA si hay delimitadores típicos)
+# - dd/mm/yy, dd/mm/yyyy, dd-mm-yyyy
+# - yyyy-mm-dd, yyyy/mm/dd
+DATE_STRICT_REGEX = re.compile(
+    r"^(?:"
+    r"\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}"     # 24/07/24 o 24-07-2024
+    r"|"
+    r"\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}"       # 2024-07-24
+    r")$"
+)
+
+# Hora estricta
+TIME_STRICT_REGEX = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")   # 01:42 o 01:42:33
+
+# Hora parcial (caso que te está rompiendo: "22:" o "7:")
+TIME_PARTIAL_REGEX = re.compile(r"^\d{1,2}:$")
+
+def looks_like_time_strict(s: str) -> bool:
+    s = str(s).strip()
+    return bool(TIME_STRICT_REGEX.fullmatch(s) or TIME_PARTIAL_REGEX.fullmatch(s))
+
+def looks_like_real_date(s: str) -> bool:
+    """
+    Regla dura:
+      - si NO contiene / o - => NO es fecha
+      - si es una hora o hora parcial => NO es fecha
+      - si matchea DATE_STRICT_REGEX => sí es fecha
+    """
+    s = str(s).strip()
+
+    # Hora o hora parcial
+    if looks_like_time_strict(s):
+        return False
+
+    # Si no tiene separadores de fecha, no es fecha
+    if "/" not in s and "-" not in s:
+        return False
+
+    return bool(DATE_STRICT_REGEX.fullmatch(s))
+
+
 
 IP_REGEX = re.compile(r"\b\d{1,3}(\.\d{1,3}){3}\b")
 
@@ -1317,10 +1362,17 @@ def detect_entities_ner(id_texto: int, texto: str, ner_pipeline) -> List[Predict
             continue
 
         span_text = texto[ns:ne]
-        # ---- FIX: no tratar horas como fecha ----
-        if ent_canon in {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA"}:
-            if looks_like_time(span_text):
+
+        # ✅ BLOQUEO FUERTE: si es FECHA*, debe ser fecha real; nunca hora
+        if ent_canon in {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA", "FECHAS"}:
+            # Si el modelo devolvió hora / hora parcial => fuera
+            if looks_like_time_strict(span_text):
                 continue
+
+            # Si el span NO es una fecha real (con / o - y patrón válido) => fuera
+            if not looks_like_real_date(span_text):
+                continue
+
 
 
         # Refina DIRECCION -> CODIGO_POSTAL/CIUDAD/PAIS (alineado)
@@ -1437,9 +1489,19 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
             if ent_canon == "FECHA":
                 ent_canon = classify_date_entity(texto, start, end)
 
-            # ✅ Evitar confundir horas tipo 22:42 o 01:42 con fechas
+            # ✅ BLOQUEO FUERTE: si es FECHA*, debe ser fecha real; nunca hora
             if ent_canon in DATE_CANON:
-                matched = texto[start:end]
+                matched = texto[start:end].strip()
+
+                # Corta inmediatamente horas y horas parciales (22:, 01:42, 01:42:33)
+                if looks_like_time_strict(matched):
+                    continue
+
+                # Si NO es una fecha real, no lo aceptes como fecha
+                # (esto elimina el caso "22" capturado por grupos)
+                if not looks_like_real_date(matched):
+                    continue
+
 
                 # Caso 1: el match es 1-2 dígitos y justo después viene ":" -> es hora, no fecha
                 if matched.isdigit() and len(matched) <= 2:
@@ -1465,10 +1527,7 @@ def detect_entities_regex(id_texto: int, texto: str, rules: List[Rule]) -> List[
                 continue
 
             span_text = texto[ns:ne]
-            # ---- FIX: no tratar horas como fecha ----
-            if ent_canon in {"FECHA", "FECHA_NACIMIENTO", "FECHA_INGRESO", "FECHA_ALTA"}:
-                if looks_like_time(span_text):
-                    continue
+            
 
 
             # Validadores
