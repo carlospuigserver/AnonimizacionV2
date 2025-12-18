@@ -64,7 +64,7 @@ def build_gold_silver_from_regex(df_textos: pd.DataFrame, rules) -> pd.DataFrame
                     "End": int(p.end),
                     "Entidad": canonicalize_entity_name(p.entity),
                     "Texto": p.text,
-                }
+                }   
             )
 
     df_gold = pd.DataFrame(rows)

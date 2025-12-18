@@ -7,13 +7,13 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification, pipelin
 
 # Configuración General
 
-EXCEL_PATH = "Gold_Standard_Anonimizacion.xlsx"
+EXCEL_PATH = "Gold_Standard_50_Notas_Completado.xlsx"
 
 SHEET_GUIDELINES = "Guidelines"       
 SHEET_TEXTOS = "Datos_Originales"      
 SHEET_GOLD = "Gold_Standard"           
 
-OUTPUT_EXCEL = "Resultados_Anonimizador_Hibrido_v3.xlsx"
+OUTPUT_EXCEL = "50_notas.xlsx"
 
 MODEL_NAME = "BSC-NLP4BIA/bsc-bio-ehr-es-meddocan"
 
