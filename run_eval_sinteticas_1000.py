@@ -72,6 +72,9 @@ def build_gold_silver_from_regex(df_textos: pd.DataFrame, rules) -> pd.DataFrame
         # por si el regex no detecta nada (raro)
         df_gold = pd.DataFrame(columns=["ID", "Start", "End", "Entidad", "Texto"])
 
+   
+
+
     # ordena para estabilidad
     df_gold = df_gold.sort_values(["ID", "Start", "End"]).reset_index(drop=True)
     return df_gold

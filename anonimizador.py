@@ -418,9 +418,19 @@ def canonicalize_entity_name(name: str) -> str:
     if "dirección" in t or "direccion" in t or "calle" in t or "territorio" in t:
         return "DIRECCION"
 
-    # Servicio/Unidad
-    if "servicio" in t or "unidad" in t:
+    # Servicio/Unidad (evitar 'servicio social' -> NO es clínico)
+    if "servicio" in t and "social" in t:
+        return t_raw.upper()  # NO es clínico
+
+    if (
+        "servicio" in t
+        or "unidad" in t
+        or _norm_specialty(t_raw) in MEDICAL_SPECIALTIES_NORM
+    ):
         return "SERVICIO_UNIDAD"
+
+
+
 
     # Sexo
     if "sexo" in t or "género" in t or "genero" in t:
@@ -597,6 +607,123 @@ def is_plausible_service_unit(span: str) -> bool:
         return False
     return True
 
+# =========================
+# WHITELIST ESPECIALIDADES -> SERVICIO_UNIDAD
+# =========================
+
+MEDICAL_SPECIALTIES = {
+    # Troncales
+    "alergología", "Alergología",
+    "anatomía patológica", "Anatomía patológica",
+    "anestesiología", "Anestesiología",
+    "angiología", "Angiología",
+    "cirugía vascular", "Cirugía vascular",
+    "cardiología", "Cardiología",
+    "cirugía cardíaca", "Cirugía cardíaca",
+    "cirugía general", "Cirugía general",
+    "cirugía pediátrica", "Cirugía pediátrica",
+    "cirugía plástica", "Cirugía plástica",
+    "cirugía torácica", "Cirugía torácica",
+    "dermatología", "Dermatología",
+    "digestivo", "Digestivo",
+    "aparato digestivo", "Aparato digestivo",
+    "endocrinología", "Endocrinología",
+    "enfermedades infecciosas", "Enfermedades infecciosas",
+    "farmacología clínica", "Farmacología clínica",
+    "hematología", "Hematología",
+    "inmunología", "Inmunología",
+    "medicina interna", "Medicina interna",
+    "medicina intensiva", "Medicina intensiva",
+    "medicina preventiva", "Medicina preventiva",
+    "medicina del trabajo", "Medicina del trabajo",
+    "nefrología", "Nefrología",
+    "neumología", "Neumología",
+    "neurología", "Neurología",
+    "neurocirugía", "Neurocirugía",
+    "obstetricia", "Obstetricia",
+    "ginecología", "Ginecología",
+    "oftalmología", "Oftalmología",
+    "oncología", "Oncología",
+    "oncología médica", "Oncología médica",
+    "oncología radioterápica", "Oncología radioterápica",
+    "otorrinolaringología", "Otorrinolaringología",
+    "pediatría", "Pediatría",
+    "psiquiatría", "Psiquiatría",
+    "radiología", "Radiología",
+    "radiodiagnóstico", "Radiodiagnóstico",
+    "rehabilitación", "Rehabilitación",
+    "reumatología", "Reumatología",
+    "traumatología", "Traumatología",
+    "cirugía ortopédica", "Cirugía ortopédica",
+    "urología", "Urología",
+    "urgencias", "Urgencias",
+
+    # Otras frecuentes en informes
+    "medicina familiar", "Medicina familiar",
+    "medicina de familia", "Medicina de familia",
+    "atención primaria", "Atención primaria",
+    "dolor", "Dolor",
+    "unidad del dolor", "Unidad del dolor",
+    "cuidados paliativos", "Cuidados paliativos",
+    "paliativos", "Paliativos",
+    "ginecología y obstetricia", "Ginecología y obstetricia",
+    "tocoginecología", "Tocoginecología",
+    "otorrino", "Otorrino",
+    "orl", "Orl",
+    "microbiología", "Microbiología",
+    "bioquímica clínica", "Bioquímica clínica",
+    "genética", "Genética",
+    "medicina nuclear", "Medicina nuclear",
+    "fisioterapia", "Fisioterapia",
+    "logopedia", "Logopedia",
+    "psicología", "Psicología",
+    "psicología clínica", "Psicología clínica",
+    "nutrición", "Nutrición",
+    "dietética", "Dietética",
+    "odontología", "Odontología",
+    "estomatología", "Estomatología",
+}
+
+
+# Normaliza acentos para comparar (ya tienes _strip_accents arriba)
+def _norm_specialty(s: str) -> str:
+    return _strip_accents(s).lower().strip()
+MEDICAL_SPECIALTIES_NORM = {_norm_specialty(x) for x in MEDICAL_SPECIALTIES}
+
+
+# Precompilamos regex con acentos “libres” (buscamos en texto normal, pero comparamos con norm)
+# Para subrayar/anotar necesitamos el span real -> buscamos candidatos por palabra y validamos por whitelist.
+SPECIALTY_TOKEN_REGEX = re.compile(
+    r"\b([A-ZÁÉÍÓÚÜÑ]?[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){0,2})\b"
+)
+
+SERVICE_CONTEXT_MARKERS = {
+    "servicio", "unidad", "consulta", "especialista", "especialidad",
+    "derivado", "derivada", "interconsulta", "valorado", "valorada",
+    "acude", "pasa", "en", "de", "por","a"
+}
+
+def is_specialty_in_context(full_text: str, start: int, end: int) -> bool:
+    """
+    Decide si un token de especialidad está en contexto clínico de servicio/unidad
+    para evitar falsos positivos.
+    """
+    left = full_text[max(0, start - 35):start].lower()
+    right = full_text[end:end + 35].lower()
+    ctx = left + " " + right
+
+    # gatillos muy típicos
+    if "especialista de" in ctx or "consulta de" in ctx or "servicio de" in ctx or "unidad de" in ctx:
+        return True
+
+    # “acude a Psiquiatría de Hospital ...”
+    if "acude a" in ctx and ("hospital" in ctx or "clinica" in ctx or "clínica" in ctx):
+        return True
+
+    # genérico: si hay palabras de contexto cerca
+    return any(k in ctx for k in SERVICE_CONTEXT_MARKERS)
+
+
 def is_plausible_sex(span: str) -> bool:
     s = span.strip().lower()
     return s in {"mujer", "hombre", "varón", "varon"}
@@ -620,33 +747,64 @@ def is_plausible_employer_org(span: str) -> bool:
 
 
 def classify_date_entity(full_text: str, start: int, end: int) -> str:
-    window_left = full_text[max(0, start - 80):start].lower()
-    window_right = full_text[end:end + 80].lower()
-    ctx = window_left + " " + window_right
+    """
+    Clasifica una fecha genérica en:
+      - FECHA_NACIMIENTO
+      - FECHA_INGRESO
+      - FECHA_ALTA
+      - FECHA (fallback)
 
+    FIX CLAVE: primero mira el CONTEXTO INMEDIATO a la izquierda (mismo renglón / etiqueta cercana),
+    para evitar que 'Fecha de nacimiento...' contamine a 'Fecha de ingreso...' si están cerca.
+    """
+    left_near = full_text[max(0, start - 45):start].lower()
+    right_near = full_text[end:end + 45].lower()
+
+    # --- 1) Heurística fuerte: etiqueta inmediata a la izquierda (prioridad absoluta) ---
     # Nacimiento
-    if any(k in ctx for k in [
-        "nacim", "nació", "nacio", "fnac", "f. nac", "f nac",
-        "fecha de nacimiento", "nacido", "nacida"
+    if any(k in left_near for k in [
+        "fecha de nacimiento", "nacimiento", "fnac", "f. nac", "f nac"
     ]):
         return "FECHA_NACIMIENTO"
 
-    # Ingreso 
+    # Ingreso / admisión
+    if any(k in left_near for k in [
+        "fecha de ingreso", "ingreso hospital", "ingreso hospitalario", "ingreso",
+        "admisión", "admision", "admis."
+    ]):
+        return "FECHA_INGRESO"
+
+    # Alta / prevista de alta
+    if any(k in left_near for k in [
+        "fecha de alta", "prevista de alta", "alta hospitalaria", "alta médica", "alta medica", "alta"
+    ]):
+        return "FECHA_ALTA"
+
+    # --- 2) Heurística secundaria: ventana algo mayor (por si la etiqueta cae justo después) ---
+    ctx = (full_text[max(0, start - 120):start] + " " + full_text[end:end + 120]).lower()
+
+    # Si aparece "ingreso" cerca, preferimos ingreso sobre nacimiento (para cortar contaminación entre líneas)
     if any(k in ctx for k in [
-        "ingres", "ingreso", "ingresó", "ingreso el", "fecha de ingreso",
-        "admis", "admisión", "admision", "admitido", "admitida", "admis.",
-        "entrada", "hospitalización", "hospitalizacion"
+        "fecha de ingreso", "ingreso hospital", "ingreso hospitalario", "ingreso",
+        "admisión", "admision", "admis.", "hospitalización", "hospitalizacion"
     ]):
         return "FECHA_INGRESO"
 
     # Alta
     if any(k in ctx for k in [
-        "alta", "alta el", "fecha de alta", "alta hospitalaria",
-        "alta médica", "alta medica", "discharge"
+        "fecha de alta", "prevista de alta", "alta hospitalaria", "alta médica", "alta medica"
     ]):
         return "FECHA_ALTA"
 
+    # Nacimiento
+    if any(k in ctx for k in [
+        "fecha de nacimiento", "nacimiento", "fnac", "f. nac", "f nac",
+        "nacido", "nacida", "nació", "nacio"
+    ]):
+        return "FECHA_NACIMIENTO"
+
     return "FECHA"
+
 
 
 def classify_person_role_by_context(full_text: str, start: int, end: int, default: str) -> str:
@@ -1070,7 +1228,62 @@ def get_extra_rules() -> List[Rule]:
     Reglas extra “mínimas” que complementan Guidelines.
     Úsalas tanto en el main como en notas sintéticas para consistencia.
     """
+        # --- Especialidades médicas frecuentes (ES) para capturar SERVICIO_UNIDAD suelto ---
+    SPECIALTIES_ALT = (
+        r"alergolog[ií]a|anatom[ií]a patol[oó]gica|anestesiolog[ií]a|angiolog[ií]a|"
+        r"cardiolog[ií]a|cirug[ií]a(?:\s+(?:general|digestiva|card[ií]aca|tor[aá]cica|vascular|pl[aá]stica|maxilofacial|pedi[aá]trica))?|"
+        r"dermatolog[ií]a|digestivo|endocrinolog[ií]a|enfermedades infecciosas|farmacolog[ií]a|"
+        r"gastroenterolog[ií]a|geriatr[ií]a|ginecolog[ií]a|hematolog[ií]a|inmunolog[ií]a|"
+        r"medicina(?:\s+(?:interna|familiar|preventiva|del trabajo|intensiva|nuclear|de urgencias))?|"
+        r"microbiolog[ií]a|nefrolog[ií]a|neumolog[ií]a|neurocirug[ií]a|neurolog[ií]a|"
+        r"obstetricia|oftalmolog[ií]a|oncolog[ií]a|otorrinolaringolog[ií]a|pediatr[ií]a|"
+        r"psiquiatr[ií]a|radiolog[ií]a|rehabilitaci[oó]n|reumatolog[ií]a|traumatolog[ií]a|"
+        r"urolog[ií]a|urgencias|uci"
+    )
+
     return [
+
+                # Especialidad suelta por contexto: "acude a Psiquiatría", "consulta de Oncología", etc.
+        # Especialidad suelta por contexto: "acude a Pediatría", "consulta de Oncología", etc.
+        Rule(
+            entity="Servicio/Unidad",
+            pattern=rf"(?i)\b(?:acude|acudi[oó]|derivad[oa]|remitid[oa]|valorad[oa]|seguimiento|control|consulta|interconsulta)\b"
+                    rf"(?:[^\n]{{0,120}}?)"
+                    rf"\b(?:a|en|por|de)\s+({SPECIALTIES_ALT})\b",
+            replacement="<SERVICE_UNIT>",
+            obligatorio=False
+        ),
+
+
+
+                # Especialista de X: "especialista de Psiquiatría"
+        Rule(
+            entity="Servicio/Unidad",
+            pattern=rf"(?i)\b(?:especialista|especialidad)\s+(?:en|de)\s+({SPECIALTIES_ALT})\b",
+            replacement="<SERVICE_UNIT>",
+            obligatorio=False
+        ),
+
+        # Urgencias como servicio/unidad (caso muy frecuente)
+        Rule(
+            entity="Servicio/Unidad",
+            pattern=r"(?i)\b(?:a|en)\s+(Urgencias)\b",
+            replacement="<SERVICE_UNIT>",
+            obligatorio=False
+        ),
+        # Variante: "Servicio de Urgencias"
+        Rule(
+            entity="Servicio/Unidad",
+            pattern=r"(?i)\b(?:servicio|unidad)\s+de\s+(Urgencias)\b",
+            replacement="<SERVICE_UNIT>",
+            obligatorio=False
+        ),
+
+
+
+
+
+
         # NHC / MRN
         Rule(
             entity="NHC",
@@ -1184,6 +1397,16 @@ def get_extra_rules() -> List[Rule]:
             replacement="<SERVICE_UNIT>",
             obligatorio=False
         ),
+        # Especialidad médica tipo "especialista de Ginecología" / "especialista en Cardiología"
+        Rule(
+            entity="Servicio/Unidad",
+            pattern=r"(?i)\bespecialista\s+(?:de|en)\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+)*)\b",
+            replacement="<SERVICE_UNIT>",
+            obligatorio=False
+        ),
+
+
+
         Rule(
             entity="Servicio/Unidad",
             pattern=r"\b(UCI|URPA|REA|UCC|Unidad\s+Coronaria)\b",
@@ -1212,6 +1435,7 @@ def get_extra_rules() -> List[Rule]:
             replacement="<EMPLOYER_ORG>",
             obligatorio=False
         ),
+        
 
 
     ]
@@ -1618,7 +1842,7 @@ ENTITY_PRIORITY = {
     "CODIGO_POSTAL": 25,
     "CIUDAD": 24,
     "PAIS": 23,
-    "SERVICIO_UNIDAD": 35,
+    "SERVICIO_UNIDAD": 65,
     "SEXO": 20,
     "ORGANIZACION_EMPLEADORA": 20,
 
@@ -1649,6 +1873,53 @@ def resolve_overlaps_global(preds: List[Prediction]) -> List[Prediction]:
     # devuelve ordenado por aparición en texto
     return sorted(kept, key=lambda x: x.start)
 
+def add_whitelist_specialties(id_texto: int, texto: str, existing: List[Prediction]) -> List[Prediction]:
+    """
+    Detecta especialidades/servicios sueltos usando MEDICAL_SPECIALTIES_NORM + contexto.
+    Ej: "acude a Urgencias", "a Neurología", "derivado a Pediatría", etc.
+    """
+    out = list(existing)
+
+    def already_has(ent: str, s: int, e: int) -> bool:
+        for p in out:
+            if p.id_texto != id_texto:
+                continue
+            if p.entity != ent:
+                continue
+            if spans_overlap(p.start, p.end, s, e):
+                return True
+        return False
+
+    for m in SPECIALTY_TOKEN_REGEX.finditer(texto):
+        s, e = m.start(1), m.end(1)
+        cand = texto[s:e].strip()
+        if not cand:
+            continue
+
+        # normaliza para comparar contra whitelist
+        cand_norm = _norm_specialty(cand)
+        if cand_norm not in MEDICAL_SPECIALTIES_NORM:
+            continue
+
+        # exige contexto (para evitar FP tipo "dolor", etc.)
+        if not is_specialty_in_context(texto, s, e):
+            continue
+
+        if already_has("SERVICIO_UNIDAD", s, e):
+            continue
+
+        out.append(
+            Prediction(
+                id_texto=id_texto,
+                start=s,
+                end=e,
+                entity="SERVICIO_UNIDAD",
+                text=texto[s:e],
+                score=1.0,
+            )
+        )
+
+    return out
 
 
 def add_context_entities(id_texto: int, texto: str, existing: List[Prediction]) -> List[Prediction]:
@@ -1703,6 +1974,11 @@ def add_context_entities(id_texto: int, texto: str, existing: List[Prediction]) 
             span = texto[s:e]
             if is_plausible_service_unit(span):
                 out.append(Prediction(id_texto=id_texto, start=s, end=e, entity="SERVICIO_UNIDAD", text=span, score=1.0))
+    
+                
+
+
+
 
     return out
 
@@ -1728,6 +2004,8 @@ def detect_all_texts(df_textos: pd.DataFrame, rules: List[Rule], ner_pipeline, m
         preds_combined = merge_predictions(preds_ner, preds_regex)
         preds_combined = resolve_overlaps_global(preds_combined)
         preds_combined = add_context_entities(tid, ttext, preds_combined)
+        preds_combined = add_whitelist_specialties(tid, ttext, preds_combined)
+        preds_combined = resolve_overlaps_global(preds_combined)
         preds_combined = resolve_overlaps_global(preds_combined)
 
         if tid == 4:
@@ -1868,6 +2146,18 @@ def anonymize_all_texts(df_textos: pd.DataFrame, all_preds: List[Prediction], ru
     for r in rules:
         rules_by_entity[canonicalize_entity_name(r.entity)] = r
         rules_by_entity[r.entity] = r  # por si en algún caso llega "tal cual"
+
+    # Asegurar siempre placeholder para servicio/unidad
+    rules_by_entity.setdefault(
+        "SERVICIO_UNIDAD",
+        Rule(
+            entity="SERVICIO_UNIDAD",
+            pattern="",
+            replacement="<SERVICE_UNIT>",
+            obligatorio=False
+    )
+)
+
 
 
     preds_by_id: Dict[int, List[Prediction]] = {}
