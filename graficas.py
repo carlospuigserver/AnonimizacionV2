@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 # =========================
 # CONFIG
 # =========================
-PATH = "Resultados_Anonimizador_Hibrido_v3.xlsx"
+PATH = "50_notas.xlsx"
 OUT_DIR = "graficas_out"
 SHOW = True          # True: plt.show() / False: no mostrar (solo guardar)
 SAVE = True          # True: guarda PNGs
